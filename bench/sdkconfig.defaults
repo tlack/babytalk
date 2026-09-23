@@ -1,0 +1,31 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# Waveshare ESP32-S3 cam: ESP32-S3R8, 16MB flash, 8MB octal PSRAM
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Benchmarks place memory explicitly; keep plain malloc internal.
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Cache geometry matters for PSRAM/flash bandwidth; mem bench reports it.
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+
+# Console on the native USB (303a:1001, same VID:PID as ROM download mode,
+# so one usbipd bind covers flashing and running).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Benchmarks hog a core for seconds at a time.
+CONFIG_ESP_TASK_WDT_EN=n
+
+CONFIG_FATFS_LFN_HEAP=y

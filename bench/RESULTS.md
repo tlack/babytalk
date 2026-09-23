@@ -55,13 +55,41 @@ at that size.)
   and keeps inputs in Q registers should do better. Two cores ≈ 1.3 GMAC/s.
 - PIE vs plain C: 4× when PSRAM-bound, 32× from SRAM.
 
+## Dual core (`fc2 1024 256 64`)
+
+Row-reuse kernel, output rows split across two tasks pinned to core 0 / core 1.
+Total GMAC/s, speedup vs one core on the same weights:
+
+| weights | 1 frame | 16 frames | 64 frames |
+|---|---|---|---|
+| SRAM | 1.30 (1.96×) | 1.35 (1.97×) | 1.35 (1.97×) |
+| PSRAM | 0.091 (**1.05×**) | 0.90 (1.89×) | **1.18** (1.91×) |
+| flash | 0.032 (**1.02×**) | 0.47 (1.58×) | **0.95** (1.84×) |
+| flash (core 0) + PSRAM (core 1) | 0.048 | 0.51 | 0.96 |
+
+- **Compute scales ~2× across cores; memory bandwidth doesn't scale at all.** With
+  no reuse, a second core adds nothing: flash and PSRAM are one shared bus (MSPI +
+  cache), already saturated by one core.
+- **Flash and PSRAM traffic is strictly serialized.** Half the weights from each: if
+  they take turns, 256KB / (128KB/32 + 128KB/88 MB/s) ≈ 47 MB/s; measured 48 MB/s.
+  Streaming experts from flash does *not* come for free alongside PSRAM trunk reads;
+  their bus time adds up.
+- **With 64-frame reuse the bus stops mattering:** PSRAM 1.18 and flash 0.95 GMAC/s,
+  vs a 1.35 SRAM ceiling. At 16 frames, flash-heavy layers lose ~half their second-core
+  gain (1.58×).
+- Planning rule: **per chunk, time ≈ max(compute on each core, total bus time)** is
+  optimistic; a sum is pessimistic. The measurements land between; plan on the
+  measured table.
+
 ## Consequences for the plan
 
 1. **Chunking isn't optional.** Inference must process 16+ frames per weight pass
    (≥640ms of audio at 25 fps). Per-frame streaming inference from PSRAM is 6–7× slower.
-2. **Active-param budget holds at ~5–10M** only with both cores and 16–64-frame
-   chunks: ~0.5–0.6 GMAC/s per core × 2 ≈ 1.1 GMAC/s → ~45M MAC/frame at 25 fps
-   before headroom for AFE, VAD, WiFi, MicroPython.
+2. **Compute budget (measured, both cores):** ~1.0–1.2 GMAC/s with 64-frame chunks
+   (2.56s), ~0.5–0.9 with 16-frame chunks (0.64s), depending on the flash/PSRAM mix.
+   At 25 fps that is ~20–45M MAC/frame before headroom for AFE, VAD, WiFi and
+   MicroPython. **~5–10M active params is comfortable**, and chunk length is now the
+   explicit latency vs throughput knob.
 3. **Flash-in-place experts work: confirmed.** The bandwidth model predicted 0.30 /
    ~0.5 GMAC/s at 16 / 64 frames from flash, and it measured **0.300 / 0.518**: 62% /
    84% of PSRAM speed. Routed experts run straight from mmapped flash with no copy-up.
@@ -74,6 +102,5 @@ at that size.)
 
 ## Next benchmarks
 
-- `fc` on both cores (does the shared PSRAM bus halve per-core throughput?).
 - SD, once a card is in.
 - ESP-DL 1D conv with `param_copy` true/false: does its conv kernel get this reuse?

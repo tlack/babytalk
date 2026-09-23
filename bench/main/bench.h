@@ -30,3 +30,4 @@ int bench_membw(int argc, char **argv);
 int bench_flash(int argc, char **argv);
 int bench_sd(int argc, char **argv);
 int bench_fc(int argc, char **argv);
+int bench_fc2(int argc, char **argv);

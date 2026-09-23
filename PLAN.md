@@ -52,7 +52,9 @@ Measured on the Waveshare board 2026-09-23 (`bench/RESULTS.md`), except SD:
 
 Compute (measured, int8 FC, one core): **~0.68 GMAC/s** from SRAM; from PSRAM it's
 **0.085 GMAC/s with no weight reuse** (bandwidth-bound) and **0.48 / 0.62 GMAC/s**
-when each weight row is reused across 16 / 64 frames. Two cores → ~1.1 GMAC/s at best.
+when each weight row is reused across 16 / 64 frames. **Both cores (measured):** 1.35
+GMAC/s from SRAM, **1.18 from PSRAM / 0.95 from flash at 64 frames**, 0.90 / 0.47 at 16
+frames. Compute scales 2× across cores; bandwidth doesn't (one shared bus).
 Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at 128×128 (~100M MACs) runs in
 94ms on the P4, so ~1 GMAC/s class is typical for these chips.
 
@@ -82,8 +84,10 @@ Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at 128×128 (~100M MACs)
 3. **SD → flash (every context change).** Writing flash is slow, wears the chip, and
    **disables the cache while it runs** (stalls both cores). So pool refreshes run
    only while the VAD says it's quiet, rewriting one expert slot at a time.
-4. **Flash and PSRAM share one memory bus (MSPI) and one cache.** Flash reads and
-   PSRAM reads compete for bandwidth instead of adding up. Measure before relying on overlap.
+4. **Flash and PSRAM share one memory bus (MSPI) and one cache.** Measured: their
+   traffic is **strictly serialized** (mixed flash+PSRAM streaming hits exactly the
+   take-turns rate), and a second core adds no bandwidth. Only weight reuse makes this
+   irrelevant: at 64 frames, both cores reach 88% (PSRAM) / 70% (flash) of the SRAM ceiling.
 
 ## 3. Design decisions
 
@@ -192,8 +196,8 @@ as a data generator:
       chunk sizes, DMA into SRAM vs PSRAM.
 - [ ] **int8 MAC throughput (`fc`):** ESP-NN PIE kernel vs plain C, weights in SRAM vs
       PSRAM, chunk sizes 1/8/16, direct vs SRAM-tiled weight reuse.
-- [ ] SD/flash reads concurrent with compute on the other core (does DMA overlap
-      cleanly? how much do flash and PSRAM contend on the shared bus?).
+- [x] Dual core: compute 1.97×, bandwidth 1.0× (shared bus); flash/PSRAM serialized.
+- [ ] SD DMA concurrent with compute (SDMMC has its own DMA, off the MSPI bus?).
 - [ ] **ESP-DL calibration:** a known model (e.g. MobileNetV2-128 from ref [1],
       re-exported for S3) on our board vs the published P4 number → the real S3/P4 ratio.
 - [ ] **ESP-DL tier knobs:** the same 1D-conv block exported as `.espdl`, run with

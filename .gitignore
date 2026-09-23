@@ -1,0 +1,17 @@
+# ESP-IDF build products
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# datasets, generated audio, checkpoints
+data/
+*.wav
+*.flac
+*.pt
+*.ckpt
+*.onnx
+*.espdl
+
+__pycache__/
+.venv/

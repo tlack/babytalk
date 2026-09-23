@@ -76,8 +76,9 @@ Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at 128×128 (~100M MACs)
 2. **Flash → core (every utterance).** A routed expert is either read **in place**
    from mmapped flash (no swap at all, ~half PSRAM speed) or **copied up** into PSRAM
    (~30ms per 1MB, then full PSRAM speed for the rest of the utterance). Measured
-   flash is 2.75× slower than PSRAM, and with 16–64-frame reuse that costs only
-   ~20–40% of compute, so **in-place looks viable** (to confirm with flash-weights `fc`).
+   flash is 2.75× slower than PSRAM, but with row reuse that costs little. **Measured
+   in place from flash: 0.30 / 0.52 GMAC/s at 16 / 64 frames = 62% / 84% of PSRAM.**
+   Default is **in place**; copy up only for experts that stay routed across many chunks.
 3. **SD → flash (every context change).** Writing flash is slow, wears the chip, and
    **disables the cache while it runs** (stalls both cores). So pool refreshes run
    only while the VAD says it's quiet, rewriting one expert slot at a time.
@@ -185,8 +186,8 @@ as a data generator:
 - [ ] **Flash mmap bandwidth (`flash`):** sequential read of the `model` partition.
 - [ ] **Flash write/erase:** per-64KB-slot erase+write time, and how long the cache
       is disabled (stall seen by a compute task on the other core).
-- [ ] **Flash in-place vs copy-up:** `fc` with weights in mmapped flash vs PSRAM,
-      plus the flash → PSRAM copy cost → the break-even utterance length.
+- [x] **Flash in-place vs copy-up:** in place = 62% / 84% of PSRAM at 16 / 64 frames.
+- [ ] Flash → PSRAM copy speed (for the copy-up break-even).
 - [ ] **SD (`sd`):** raw-sector and FAT sequential reads, 1-bit SDMMC at 20/40MHz,
       chunk sizes, DMA into SRAM vs PSRAM.
 - [ ] **int8 MAC throughput (`fc`):** ESP-NN PIE kernel vs plain C, weights in SRAM vs

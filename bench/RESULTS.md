@@ -39,7 +39,11 @@ Ratios: PSRAM is **2.75×** flash. Full-tier read time: PSRAM 8MB ≈ 95ms, flas
 | plain C | PSRAM | 0.021 | | | |
 | PIE, per frame | PSRAM | 0.085 | 0.085 | 0.085 | |
 | **PIE, row reuse** | PSRAM | 0.087 | 0.252 | **0.479** | **0.619** |
+| **PIE, row reuse** | **flash (mmapped, in place)** | 0.032 | 0.112 | **0.300** | **0.518** |
 | PIE, row reuse | SRAM | 0.667 | 0.680 | 0.683 | 0.684 |
+
+(Flash row from a 1024×256 layer, `fc 1024 256 64`; PSRAM/SRAM rows are identical
+at that size.)
 
 - **Without weight reuse, PSRAM caps compute at 0.085 GMAC/s**: the weights stream at
   85 MB/s, which is the PSRAM bandwidth. Calling a stock FC kernel once per frame is the
@@ -58,16 +62,18 @@ Ratios: PSRAM is **2.75×** flash. Full-tier read time: PSRAM 8MB ≈ 95ms, flas
 2. **Active-param budget holds at ~5–10M** only with both cores and 16–64-frame
    chunks: ~0.5–0.6 GMAC/s per core × 2 ≈ 1.1 GMAC/s → ~45M MAC/frame at 25 fps
    before headroom for AFE, VAD, WiFi, MicroPython.
-3. **Flash-in-place experts look viable** (prediction, needs a flash-weights `fc` run):
-   the same model at 32 MB/s gives a 1MB layer at 16 frames ≈ 31ms load + 25ms MAC
-   → ~0.3 GMAC/s; at 64 frames ≈ 0.5 GMAC/s. Routed experts could run straight
-   from flash at 60–80% of PSRAM speed, with no copy-up.
+3. **Flash-in-place experts work: confirmed.** The bandwidth model predicted 0.30 /
+   ~0.5 GMAC/s at 16 / 64 frames from flash, and it measured **0.300 / 0.518**: 62% /
+   84% of PSRAM speed. Routed experts run straight from mmapped flash with no copy-up.
+   Copy-up only pays for an expert that stays routed for many chunks: the in-place
+   penalty is ~5ms per chunk for a 256KB layer, against an estimated ~13ms one-time
+   copy (flash→PSRAM copy speed not yet measured). Default: **in place**; copy up
+   only for sticky experts, and only if PSRAM has room.
 4. ESP-DL / ESP-NN kernels must be checked for this reuse pattern. A stock per-frame
    FC call would leave 85% of the compute on the table.
 
 ## Next benchmarks
 
-- `fc` with weights in mmapped flash (confirm consequence 3).
 - `fc` on both cores (does the shared PSRAM bus halve per-core throughput?).
 - SD, once a card is in.
 - ESP-DL 1D conv with `param_copy` true/false: does its conv kernel get this reuse?

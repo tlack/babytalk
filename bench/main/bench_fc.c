@@ -8,10 +8,13 @@
 //             matrix streams through the cache once per frame
 //   pie_rows  PIE dot product, row-major: each weight row is fetched once and
 //             applied to every frame in the chunk (weight reuse, PLAN §2 wall 2)
-// Placement: weights in PSRAM (full layer), and in internal SRAM (as many
-// output rows as fit) for the no-PSRAM ceiling.
+// Placement: weights in PSRAM (full layer), in mmapped flash (the `model`
+// partition, read in place -- its contents are whatever is there, which doesn't
+// matter for timing), and in internal SRAM (as many output rows as fit) for the
+// ceiling.
 #include <string.h>
 #include "esp_heap_caps.h"
+#include "esp_partition.h"
 #include "esp_nn.h"
 #include "esp_nn_ansi_headers.h"
 #include "bench.h"
@@ -108,6 +111,15 @@ int bench_fc(int argc, char **argv)
         printf("alloc failed (weights %u bytes)\n", (unsigned)wbytes);
         goto out;
     }
+    const esp_partition_t *part =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "model");
+    const void *wf = NULL;
+    esp_partition_mmap_handle_t wf_handle = 0;
+    if (!part || wbytes + PAD > part->size ||
+        esp_partition_mmap(part, 0, wbytes + PAD, ESP_PARTITION_MMAP_DATA, &wf, &wf_handle) != ESP_OK) {
+        printf("flash mmap failed; skipping flash placement\n");
+        wf = NULL;
+    }
     fill(wp, wbytes, 1);
     fill(ws, (size_t)in * sram_out, 2);
     fill(x, (size_t)in * max_frames, 3);
@@ -118,13 +130,19 @@ int bench_fc(int argc, char **argv)
         if (frames > max_frames) break;
         fc_job_t jp = {wp, x, y, acc, in, out, frames};
         fc_job_t js = {ws, x, y, acc, in, sram_out, frames};
+        fc_job_t jf = {wf, x, y, acc, in, out, frames};
         if (frames == 1) measure("ansi", run_ansi, "psram", &jp);
         measure("pie", run_pie, "psram", &jp);
         measure("pie_rows", run_pie_rows, "psram", &jp);
+        if (wf) {
+            measure("pie", run_pie, "flash", &jf);
+            measure("pie_rows", run_pie_rows, "flash", &jf);
+        }
         measure("pie", run_pie, "sram", &js);
         measure("pie_rows", run_pie_rows, "sram", &js);
     }
     rc = 0;
+    if (wf) esp_partition_munmap(wf_handle);
 
 out:
     heap_caps_free(wp); heap_caps_free(ws); heap_caps_free(x);

@@ -15,3 +15,6 @@ data/
 
 __pycache__/
 .venv/
+
+# full-flash dumps contain node tokens / wifi creds
+backups/

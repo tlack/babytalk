@@ -41,20 +41,20 @@ slower than the one above. The number that matters is **how often a tier can be 
 in full** (capacity ÷ bandwidth). That sets how often its contents can change, so
 **each tier is assigned to the model timescale that matches its sweep rate.**
 
-Estimates — Phase 0 replaces them with measurements:
+Measured on the Waveshare board 2026-09-23 (`bench/RESULTS.md`), except SD:
 
 | Tier | Size (usable) | Effective read | Full read takes | Sweeps | Holds | Changes |
 |---|---|---|---|---|---|---|
-| **0 SRAM** | ~250KB free after IDF (+64KB cache) | ~0.5–1 GB/s | ~0.3 ms | ~3000×/s | subsampler, router, activations, current weight tile, audio buffers | **every frame** |
-| **1 PSRAM** | 8MB, read/write | ~40–80 MB/s | ~130 ms | ~7×/s | shared trunk, generalist expert, active experts (if copied up) | **every chunk** |
-| **2 Flash** | ~11MB `model` partition, read-mostly | ~15–30 MB/s mmapped | ~0.6 s | ~1–2×/s | the **expert pool** | **every utterance** (routing) |
-| **3 SD** | 32GB | ~2–4 MB/s (1-bit bus) | ~3 hours | a few ×/day | the **pool library**, recordings for adaptation, logs | **every context change** |
+| **0 SRAM** | **286KB** free after bare IDF (+64KB cache) | ≥425 MB/s (scalar; SIMD higher) | <1 ms | >1000×/s | subsampler, router, activations, current weight tile, audio buffers | **every frame** |
+| **1 PSRAM** | 8MB, read/write | **88 MB/s** read, 49 write | ~95 ms | ~10×/s | shared trunk, generalist expert, active experts (if copied up) | **every chunk** |
+| **2 Flash** | 11MB `model` partition, read-mostly | **32 MB/s** mmapped | ~360 ms | ~3×/s | the **expert pool** | **every utterance** (routing) |
+| **3 SD** | 32GB | ~2–4 MB/s (1-bit bus; *estimate*) | ~3 hours | a few ×/day | the **pool library**, recordings for adaptation, logs | **every context change** |
 
-Compute ceiling: PIE SIMD ~7 GMAC/s int8 peak (2 cores), **~0.3–1 GMAC/s sustained**
-→ the active-param budget. Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at
-128×128 (~100M MACs) runs in 94ms on the *P4* — only ~1 GMAC/s on the faster chip,
-on a depthwise-heavy net. Expect the S3 below that; dense 1D convs/GEMMs should do
-better than depthwise. Phase 0 measures it; if it lands low, the budget is ~3–5M.
+Compute (measured, int8 FC, one core): **~0.68 GMAC/s** from SRAM; from PSRAM it's
+**0.085 GMAC/s with no weight reuse** (bandwidth-bound) and **0.48 / 0.62 GMAC/s**
+when each weight row is reused across 16 / 64 frames. Two cores → ~1.1 GMAC/s at best.
+Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at 128×128 (~100M MACs) runs in
+94ms on the P4, so ~1 GMAC/s class is typical for these chips.
 
 ### Tier rules
 1. **Contents change no faster than the tier's sweep rate.** Nothing in the inference
@@ -71,10 +71,13 @@ better than depthwise. Phase 0 measures it; if it lands low, the budget is ~3–
 1. **PSRAM → core (every chunk).** 5MB of weights × 25 frames/s = 125MB/s, which is more than
    PSRAM delivers. Fix: **chunked inference** — run 8–16 frames per weight pass
    (100–300ms lookahead) with the weight tile in SRAM, so each byte fetched feeds 8–16 MACs.
+   **Measured:** per-frame calls run at 0.085 GMAC/s; 16-frame reuse 0.48, 64-frame 0.62.
+   Chunking is mandatory, and every kernel we use must reuse weights this way.
 2. **Flash → core (every utterance).** A routed expert is either read **in place**
    from mmapped flash (no swap at all, ~half PSRAM speed) or **copied up** into PSRAM
-   (~40ms per 1MB, then full PSRAM speed for the rest of the utterance). Which wins
-   depends on utterance length vs copy cost — Phase 0 measures both.
+   (~30ms per 1MB, then full PSRAM speed for the rest of the utterance). Measured
+   flash is 2.75× slower than PSRAM, and with 16–64-frame reuse that costs only
+   ~20–40% of compute, so **in-place looks viable** (to confirm with flash-weights `fc`).
 3. **SD → flash (every context change).** Writing flash is slow, wears the chip, and
    **disables the cache while it runs** (stalls both cores). So pool refreshes run
    only while the VAD says it's quiet, rewriting one expert slot at a time.

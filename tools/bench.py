@@ -48,9 +48,23 @@ def open_port(path):
     return ser
 
 
+def wait_ready(ser, timeout=10):
+    """Opening the port can reset the chip (USB-Serial-JTAG), so wait for the
+    console prompt rather than assuming it's there. Pokes with newlines."""
+    end = time.monotonic() + timeout
+    buf = b""
+    while time.monotonic() < end:
+        ser.write(b"\n")
+        buf = (buf + ser.read(4096))[-4096:]
+        if b"bench>" in buf:
+            time.sleep(0.2)
+            ser.reset_input_buffer()
+            return
+    sys.exit(f"no bench> prompt within {timeout}s -- is the bench firmware running?")
+
+
 def run(ser, cmd, meta, out):
     name = cmd.split()[0]
-    ser.reset_input_buffer()
     ser.write((cmd + "\n").encode())
     last = time.monotonic()
     count = 0
@@ -98,8 +112,7 @@ def main():
     path = results / f"{now:%Y-%m-%d}-{args.board}.jsonl"
 
     ser = open_port(args.port)
-    ser.write(b"\n")  # get a fresh prompt
-    time.sleep(0.3)
+    wait_ready(ser)
     with path.open("a") as out:
         rc = run(ser, cmd, meta, out)
     print(f"-> {path.relative_to(ROOT)}")

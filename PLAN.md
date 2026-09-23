@@ -50,8 +50,11 @@ Estimates — Phase 0 replaces them with measurements:
 | **2 Flash** | ~11MB `model` partition, read-mostly | ~15–30 MB/s mmapped | ~0.6 s | ~1–2×/s | the **expert pool** | **every utterance** (routing) |
 | **3 SD** | 32GB | ~2–4 MB/s (1-bit bus) | ~3 hours | a few ×/day | the **pool library**, recordings for adaptation, logs | **every context change** |
 
-Compute ceiling: PIE SIMD ~7 GMAC/s int8 peak (2 cores), **~0.5–1.5 GMAC/s sustained**
-→ the active-param budget.
+Compute ceiling: PIE SIMD ~7 GMAC/s int8 peak (2 cores), **~0.3–1 GMAC/s sustained**
+→ the active-param budget. Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at
+128×128 (~100M MACs) runs in 94ms on the *P4* — only ~1 GMAC/s on the faster chip,
+on a depthwise-heavy net. Expect the S3 below that; dense 1D convs/GEMMs should do
+better than depthwise. Phase 0 measures it; if it lands low, the budget is ~3–5M.
 
 ### Tier rules
 1. **Contents change no faster than the tier's sweep rate.** Nothing in the inference
@@ -80,10 +83,34 @@ Compute ceiling: PIE SIMD ~7 GMAC/s int8 peak (2 cores), **~0.5–1.5 GMAC/s sus
 
 ## 3. Design decisions
 
-- **Toolchain:** ESP-DL (int8/int16) + ESP-PPQ quantization from PyTorch → ONNX.
-  ESP-SR for the audio front end (AFE) only (not MultiNet — that's a fixed-phrase list, not open vocab).
+- **Toolchain:** ESP-DL (int8/int16) + ESP-PPQ quantization from PyTorch → ONNX
+  (opset 18). ESP-SR for the audio front end (AFE) only (not MultiNet — that's a fixed-phrase list, not open vocab).
+- **ESP-DL already implements much of the tier plumbing** (ref [1], `dl::Model`):
+  - `location`: model in app rodata, **a flash partition (by label)**, or **SD card (by path)**.
+  - `param_copy=false`: run weights **in place from mmapped flash** instead of copying
+    them to PSRAM — exactly our in-place vs copy-up choice, as a constructor flag.
+  - `model_index` / `model_name`: several models packed in one `.espdl`, picked by name.
+  - `max_internal_size`: how much internal SRAM the memory planner may use (tier 0 budget).
+  So: **start with stock ESP-DL**, split into sub-models (trunk, one per expert block,
+  head), and only write custom loaders/kernels where measurement says it's needed.
+- **Architecture follows ESP-DL's operator set.** Supported (int8 + int16): 1D/2D Conv
+  (groups = 1 or depthwise only), Gemm/MatMul, **GRU, LSTM**, Softmax, Swish/HardSwish,
+  ReLU/PReLU, ReduceMean, Sqrt, Div… **No LayerNormalization** (it would be decomposed
+  into several quantization-sensitive ops). So the first model family is **QuartzNet /
+  Citrinet style**: 1D depthwise-separable conv + BatchNorm (folds into the conv) +
+  ReLU, optionally a small GRU for context. Conformers (LayerNorm + attention) come
+  later, if at all. Conv ops use NWC layout.
+- **Quantize for ESP-DL from day one.** ESP-DL quantization is **symmetric, per-tensor,
+  power-of-two scales** (an `exponent`), which is coarse. Lessons from ref [1]: plain ReLU,
+  not bounded ReLU6 (~2% on its own there); layerwise equalization + KL
+  calibration + bias correction for PTQ; then **QAT recovered a further 2–4%**. For us:
+  choose quant-friendly activations up front, train with QAT, and keep sensitive layers
+  (first conv, CTC head, router) in **int16** (mixed precision is supported per layer).
 - **Experts are deltas, not full blocks** (low-rank / int4 over a resident base
   where possible) → ~10× fewer bytes per swap → finer routing becomes affordable.
+  A LoRA delta needs no custom op: `y = Wx + B(Ax)` is just a parallel low-rank
+  Conv/Gemm branch plus an Add, which ESP-DL runs natively. The resident base `W`
+  lives in PSRAM; the expert is the small `A`,`B` pair in flash.
 - **Always-resident generalist expert** as fallback while a routed expert is loading
   or when router confidence is low.
 - **Hard top-1 routing, trained for robustness:** randomly substitute wrong/generalist
@@ -104,12 +131,14 @@ Compute ceiling: PIE SIMD ~7 GMAC/s int8 peak (2 cores), **~0.5–1.5 GMAC/s sus
   (same pattern as our `lvgl_micropython` builds). Inference runs as a FreeRTOS
   task pinned to core 1 — **not** in the asyncio loop (Watchtower `97e0a84` measured
   loop stalls). MicroPython sees only `stt.feed(pcm)` / `stt.poll() -> text`.
-- **Flash pool layout:** the `model` partition is a table of fixed-size, 64KB-aligned
-  **expert slots** (flash erase blocks), each holding one expert blob (header +
-  int8 tensors in ESP-DL layout), plus a small slot index. Experts run straight from
-  the mmapped slot or are copied up as one sequential read. Slot-level rewrites make
-  a pool refresh incremental and crash-safe (a slot is marked valid only after its
-  write verifies), with no A/B halving of capacity.
+- **Flash pool layout: slots are partitions.** Instead of one big `model` partition
+  with a custom slot table, the partition table carries N fixed-size **expert
+  partitions** (`ex00`…`exNN`, 64KB-aligned), each holding one `.espdl` that ESP-DL
+  loads by label (`MODEL_LOCATION_IN_FLASH_PARTITION`, in place or copied up). A pool
+  refresh rewrites one partition at a time; a tiny index partition records which
+  expert each slot holds and marks it valid only after the write verifies
+  (crash-safe, no A/B halving). Custom blob format only if ESP-DL's per-model
+  overhead turns out too high.
 - **SD library layout:** one directory per context pool (`pools/<context>/`), same
   blob format as flash slots, so a refresh is a plain copy with no re-encoding. SD
   is never read in the inference path.
@@ -161,7 +190,12 @@ as a data generator:
       PSRAM, chunk sizes 1/8/16, direct vs SRAM-tiled weight reuse.
 - [ ] SD/flash reads concurrent with compute on the other core (does DMA overlap
       cleanly? how much do flash and PSRAM contend on the shared bus?).
-- [ ] ESP-DL conv block from a real exported `.espdl` model.
+- [ ] **ESP-DL calibration:** a known model (e.g. MobileNetV2-128 from ref [1],
+      re-exported for S3) on our board vs the published P4 number → the real S3/P4 ratio.
+- [ ] **ESP-DL tier knobs:** the same 1D-conv block exported as `.espdl`, run with
+      `param_copy` true vs false (flash in place) and a `max_internal_size` sweep.
+- [ ] **ESP-DL per-model overhead:** load/switch time and memory for many small
+      sub-models (trunk → expert → head chained) vs one monolithic model.
 - [ ] AFE + VAD + log-mel CPU cost with the dual-mic array.
 
 **Output:** `bench/RESULTS.md` → replaces the §2 tier table with measurements, and
@@ -169,11 +203,12 @@ fixes the active-param budget, chunk size, flash pool size, and in-place vs copy
 
 ### Phase 1 — Dense baseline, desktop
 - [ ] TTS data generator (§3a) producing a first ~1000h synthetic set.
-- [ ] Small streaming CTC model (QuartzNet / small conformer class) sized to the
-      Phase 0 budget; train on LibriSpeech + Common Voice + synthetic (+ our own
+- [ ] Small streaming CTC model (QuartzNet / Citrinet class, ESP-DL ops only —
+      §3) sized to the Phase 0 budget; train on LibriSpeech + Common Voice + synthetic (+ our own
       mic captures). Ablate: real-only vs real+synthetic, measured on real audio.
 - [ ] Train with VAD gating + frame dropping on, matching the runtime.
-- [ ] Quantize with ESP-PPQ; measure WER float vs int8 on desktop.
+- [ ] Quantize with ESP-PPQ (PTQ with equalization / KL / bias correction, then
+      QAT; int16 for sensitive layers); measure WER float vs PTQ vs QAT on desktop.
 - [ ] Record reference audio through the ES7210 so eval matches the real front end.
 
 ### Phase 2 — Dense baseline, on device
@@ -227,8 +262,34 @@ data/         (gitignored) datasets, mic captures
   (int4 / deltas / Bloom connectivity) to fit a useful pool?
 - Flash wear from pool refreshes: fine at a few per day (~100k erase cycles per
   block), but needs a cap so a flapping context signal can't thrash it.
-- Does ESP-DL support the ops we need for streaming (stateful/cached convs,
-  attention if we go conformer), or do we write custom PIE kernels?
+- ESP-DL has the ops for a conv/GRU CTC model (§3), but **streaming state** (cached
+  conv context between chunks, GRU hidden state carried across calls) — does it
+  handle this, or do we manage state tensors ourselves around `model->run()`?
+- Custom kernels (Bloom connectivity, fused delta+base) mean hand-written PIE
+  assembly: no compiler auto-vectorization, only 8 × 128-bit Q registers, and
+  S3 (Xtensa `ee.*`, 160-bit QACC halves) vs P4 (RISC-V `esp.*`, 256-bit QACC) kernels
+  **do not port** — each chip needs its own. The S3's 8-bit MAC lanes accumulate in
+  ~20 bits, so long dot products must go through the 40-bit ACCX or be split (ESP-NN's
+  kernels already handle this).
 - Can the router decide reliably from the first ~0.5s of an utterance?
 - Is PSRAM contention with the camera (on camera nodes) a problem while STT runs?
-- Would an ESP32-P4 target (faster core, more memory bandwidth) be worth a parallel track?
+- Would an ESP32-P4 target be worth a parallel track? Ref [1] shows ~1 GMAC/s class
+  int8 inference there with the same ESP-DL model files (re-exported per target), so
+  a model developed for the S3 moves up cleanly, but custom PIE kernels would not.
+
+## 7. References
+
+1. **esp32-p4-vehicle-classifier** — https://github.com/boumedinebillal/esp32-p4-vehicle-classifier
+   INT8 MobileNetV2 (3.5M params, 2.6MB) via ESP-DL/ESP-PPQ on the P4: 96px 70ms,
+   128px 118ms total (94ms model, 80%), 256px 459ms. PTQ (equalization, KL, bias
+   correction) → QAT; ReLU6→ReLU. Loads the model from app rodata with ESP-DL
+   `param_copy` default (copy to PSRAM). Ships an S3 sdkconfig identical to ours
+   (octal PSRAM 80MHz, 64KB/64B dcache) but reports no S3 numbers. Useful as a
+   training/export pipeline template.
+2. **Espressif, "Introduction to the ESP32-P4/S3 PIE"** —
+   https://developer.espressif.com/blog/2024/12/pie-introduction/
+   8 × 128-bit Q registers (16×int8 / 8×int16 / 4×int32 lanes); S3 QACC 2×160-bit,
+   P4 2×256-bit; 40-bit ACCX; loads/stores want 128-bit alignment (unaligned
+   supported via extra instructions); written as inline asm or `.S`. P4-only benchmarks
+   (memcpy 74% faster than libc; int16 vector add 94% faster than C). No S3 numbers,
+   no comments section.

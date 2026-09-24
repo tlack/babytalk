@@ -136,3 +136,29 @@ uv run stats.py                                           # params / MACs / acti
 Per-utterance hypotheses: `data/results/*.tsv` (uid, duration, ref, hyp); summaries in
 `data/results/summary.jsonl` and `quant_summary.jsonl`; per-op exponents in
 `data/results/exponents_<tag>.tsv`. Data: LibriSpeech test-clean + dev-clean in `data/librispeech/`.
+
+## Board mic recordings (data/recordings, 2026-09-23)
+
+9 live-voice clips of the user speaking to the Waveshare board's ES7210 mic 1
+(16 kHz, gain 14, normal speaking range; 65 words total) plus one LibriSpeech clip
+replayed from the laptop speaker across the room. `uv run recordings.py` (float) and
+`uv run quantize.py … --eval-set recordings` (int8 sims). One word = 1.5% WER here, so
+treat differences of a word or two as noise.
+
+| pipeline | live voice WER | errors |
+|---|---|---|
+| float, exact lengths | **4.62%** | hello world**s**; claude opus → cloopus |
+| float, static 1600-frame window (tiled fill) | 6.15% | + hello → hellow |
+| **w8a16 sim (esp32s3)** | **7.69%** | + in → and |
+| int8 sim (esp32s3, CLE) | 10.77% | + town → towning, union → uniony, cloopus → claodopus a |
+
+- Clean source vs board mic is a small gap at speaking range: most live clips are
+  word-perfect. The misses are a proper noun LibriSpeech never saw ("Claude Opus")
+  and short-clip edge effects.
+- Laptop-speaker replay across the room is the hard case: 17.9% float vs 0% on the
+  same clip clean (−43 dBFS speech, ~11 dB over the room floor).
+- Very short clips (2 s) get tiled ~8× to fill the 16 s window; "hellow" appears only
+  in the static pipeline, so the tiling fill is worth revisiting for short push-to-talk
+  commands (e.g. a shorter static window, or fill with silence + masked SE).
+- int8's extra errors on real audio match its test-clean loss (5.7–5.9 vs 3.4); w8a16
+  stays close to float. **The board should run w8a16** until QAT closes the int8 gap.

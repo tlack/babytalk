@@ -1,0 +1,11 @@
+[project]
+name = "datagen"
+version = "0.1.0"
+description = "Synthetic speech for training/eval (TTS fan-out)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=2.2.6",
+    "piper-tts>=1.8.0",
+    "soundfile>=0.14.0",
+    "soxr>=1.1.0",
+]

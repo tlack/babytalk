@@ -23,10 +23,11 @@ int stt_num_frames(int n_samples);
 void stt_features(const int16_t *pcm, int n, float *out, float *scratch);
 size_t stt_scratch_floats(void);
 
-// Fill the static [1600][80] input: the clip repeated with STT_FILL_GAP zero frames
-// between copies (keeps squeeze-excite's window mean close to the clip's mean), then
-// quantized to int16 with scale 2^-exponent (round half up, saturating). T <= 1600.
-void stt_fill_quant(const float *feats, int T, int16_t *dst, int exponent);
+// Fill a [W][80] model input from T frames of features and quantize to int16 with
+// scale 2^-exponent (round half up, saturating). W == T: the clip as-is (exact-length
+// model input). W > T: the clip repeated with STT_FILL_GAP zero frames between copies
+// (keeps squeeze-excite's window mean close to the clip's mean). T <= W.
+void stt_fill_quant(const float *feats, int T, int16_t *dst, int W, int exponent);
 
 // Output frames that belong to T valid input frames (three stride-2 convs).
 int stt_out_frames(int T);

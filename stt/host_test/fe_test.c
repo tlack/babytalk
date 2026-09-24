@@ -22,7 +22,7 @@ int main(int argc, char **argv)
     f = fopen(argv[2], "wb"); fwrite(feats, sizeof(float), (size_t)T * 80, f); fclose(f);
     if (T <= STT_WIN_FRAMES) {
         int16_t *win = malloc(2 * STT_WIN_FRAMES * 80);
-        stt_fill_quant(feats, T, win, atoi(argv[4]));
+        stt_fill_quant(feats, T, win, STT_WIN_FRAMES, atoi(argv[4]));
         f = fopen(argv[3], "wb"); fwrite(win, 2, STT_WIN_FRAMES * 80, f); fclose(f);
     }
     printf("%d\n", T);

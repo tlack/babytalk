@@ -100,11 +100,11 @@ void stt_features(const int16_t *pcm, int n, float *out, float *scratch)
     }
 }
 
-void stt_fill_quant(const float *feats, int T, int16_t *dst, int exponent)
+void stt_fill_quant(const float *feats, int T, int16_t *dst, int W, int exponent)
 {
     const float scale = ldexpf(1.0f, -exponent);
-    const int unit = T + STT_FILL_GAP;
-    for (int t = 0; t < STT_WIN_FRAMES; t++) {
+    const int unit = W == T ? T : T + STT_FILL_GAP;
+    for (int t = 0; t < W; t++) {
         int u = t % unit;
         int16_t *d = dst + (size_t)t * MEL_N;
         if (u >= T) {

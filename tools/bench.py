@@ -48,7 +48,7 @@ def open_port(path):
     return ser
 
 
-def wait_ready(ser, timeout=10):
+def wait_ready(ser, timeout=10, prompt=b"bench>"):
     """Opening the port can reset the chip (USB-Serial-JTAG), so wait for the
     console prompt rather than assuming it's there. Pokes with newlines."""
     end = time.monotonic() + timeout
@@ -56,11 +56,11 @@ def wait_ready(ser, timeout=10):
     while time.monotonic() < end:
         ser.write(b"\n")
         buf = (buf + ser.read(4096))[-4096:]
-        if b"bench>" in buf:
+        if prompt in buf:
             time.sleep(0.2)
             ser.reset_input_buffer()
             return
-    sys.exit(f"no bench> prompt within {timeout}s -- is the bench firmware running?")
+    sys.exit(f"no {prompt.decode()} prompt within {timeout}s -- is the right firmware running?")
 
 
 def run(ser, cmd, meta, out):

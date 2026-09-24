@@ -1,0 +1,12 @@
+{
+    "deploy": ["../deploy.md"],
+    "deploy_options": {"flash_offset": "0"},
+    "docs": "",
+    "features": ["BLE", "External Flash", "External RAM", "WiFi"],
+    "images": [],
+    "mcu": "esp32s3",
+    "product": "Waveshare ESP32-S3-CAM with on-device speech to text",
+    "thumbnail": "",
+    "url": "",
+    "vendor": "Waveshare"
+}

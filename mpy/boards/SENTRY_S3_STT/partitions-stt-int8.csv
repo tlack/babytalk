@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# int8 model layout: same app, a 10MB model partition, ~2MB left for MicroPython's "vfs"
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x400000,
+model,    data, 0x40,    0x410000, 0xA00000,
+# no "vfs" row: MicroPython creates it from 0xE10000 to the end of flash at boot

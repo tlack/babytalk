@@ -9,6 +9,9 @@ text = stt.transcribe(pcm)                 # 16 kHz audio -> "what's the weather
 audio = tts.say("You said: " + text)       # text -> 24 kHz audio for the speaker
 ```
 
+Made by Thomas Lackner and Claude Opus 5.5 (Anthropic). MIT licensed; the speech models
+belong to their authors (see [Credits and licenses](#credits-and-licenses)).
+
 ## Is this for you?
 
 Most "voice on ESP32" projects do one of two things:
@@ -23,8 +26,22 @@ A wake phrase is any phrase you type ("wake up, tomato face"), also with no trai
 Optionally the same firmware **speaks** replies with an on-device neural voice.
 
 You'll want it if you need voice input that keeps working offline, keeps audio private, or
-can't depend on a server. Skip it if you need very high accuracy, languages other than
-English, or it has to run on a smaller chip (see requirements).
+can't depend on a server. For example:
+
+- **Radios without keyboards.** A LoRa node (Meshtastic, or your own protocol) with a
+  microphone but no keyboard: speak a message, and the node sends it as text. A spoken
+  sentence becomes a few dozen bytes of text; even a very low-bitrate voice codec (Codec2
+  at 700 bit/s) needs about ten times that, which matters on a link that moves a few
+  hundred bytes per second at best.
+- **Speakers without screens.** The receiving node reads incoming text messages aloud.
+- **Voice control that works when the WiFi doesn't**, and never sends audio anywhere.
+
+Skip it if you need very high accuracy, languages other than English, or it has to run on
+a smaller chip (see below).
+
+(This may also be the only project that involves both **LoRa** radios and **LoRA**,
+Low-Rank Adaptation. The original research plan in `docs/historical/` explored LoRA-style
+expert adapters for the speech model. They aren't used yet.)
 
 ## What you need
 
@@ -44,78 +61,147 @@ mic -> 16 kHz audio -> log-mel features -> Citrinet-256 (neural net) -> letters/
 text -> pronunciation dictionary -> phonemes -> sanoTTS voice -> 24 kHz audio -> speaker
 ```
 
-- **Speech to text** uses NVIDIA's [Citrinet-256](https://huggingface.co/nvidia/stt_en_citrinet_256_ls)
-  (CC-BY-4.0), a 9.8-million-parameter recognizer trained on 960 hours of English
-  audiobooks. It outputs text directly ("CTC"), so it has no vocabulary list to maintain.
+- **Speech to text** uses NVIDIA's [Citrinet-256](https://huggingface.co/nvidia/stt_en_citrinet_256_ls),
+  a 9.8-million-parameter recognizer trained on 960 hours of English audiobooks. It
+  outputs text directly ("CTC"), so it has no vocabulary list to maintain.
 - **Wake phrases**: the same model output is scored against your phrase's spellings, so
   any phrase works. `export/kws_validate.py` checks a phrase against hours of other speech
   to pick a threshold that avoids false wakes.
 - **Text to speech** uses the 294k-parameter "nano" voice from
-  [sanoTTS](https://github.com/Ampixa/sanoTTS) (runtime MIT, dictionary Apache-2.0). It is
-  optional: the firmware builds without it.
+  [sanoTTS](https://github.com/Ampixa/sanoTTS). It is optional: the firmware builds
+  without it.
 
 ### MMRT, the runtime
 
-Off-the-shelf options were too slow or too big, so the model runs on **MMRT** (`mmrt/`), a
-small inference engine written for this project:
+The model runs on **MMRT** (`mmrt/`), a small inference engine written for this project.
+We started with Espressif's ESP-DL. It gave correct results but took 1.33 s to process
+each second of audio, because it re-read every layer's weights from flash for every frame
+of audio and used one core. Fixing that meant patching ESP-DL, which nobody else could easily
+build, so we wrote our own. MMRT is about 13 times faster than stock ESP-DL and half its
+size, with identical output:
 
 - It reads the model **in place from flash**; nothing is copied to RAM at startup.
-- It uses the ESP32-S3's vector instructions (hand-written assembly) and **both cores**.
-- It loads **int8 or 4-bit weights** from a simple model file. Its output matches a PC
-  simulation of the same model bit for bit, which is how every kernel is tested.
+- It copies each layer's weights into fast internal RAM **once per layer**, not once per
+  frame, and splits the work across **both cores**.
+- Its kernels are **hand-written assembly** for the ESP32-S3's vector instructions,
+  doing 16 multiply-adds per instruction.
+- It **fuses layers** so intermediate results stay in internal RAM, and on short clips it
+  overlaps copying the next layer's weights with computing the current one.
+- It loads **8-bit or 4-bit weights**, and every kernel is tested bit for bit against a
+  plain C version.
+
+Details, a C usage example and the measurements behind each design choice:
+[`mmrt/README.md`](mmrt/README.md).
 
 ### Quantization: fitting a 40 MB model into 6 MB
 
-The original model uses 32-bit floats (~39 MB). Here it is compressed twice:
+The original model uses 32-bit floats (~39 MB). It is compressed twice:
 
 1. **int8**: weights and activations become 8-bit integers (9.8 MB).
-2. **4-bit weights**: each output channel keeps 16 weight values in a small lookup table,
-   chosen with GPTQ (an error-compensating method). The first and last layers stay int8.
+2. **int4**: each output channel keeps 16 weight values in a small lookup table, chosen
+   with GPTQ (an error-compensating method). The first and last layers stay 8-bit.
    Result: **6.0 MB**.
 
-Each step costs some accuracy. Word error rate on LibriSpeech test-clean (clean read
-English), lower is better:
+Both are ready to use in [`models/`](models/). Word error rate on LibriSpeech test-clean
+(clean read English), lower is better:
 
-| model | size | word error rate |
-|---|---|---|
-| original (float) | ~39 MB | 3.8% |
-| int8 | 9.8 MB | 6.3% |
-| **4-bit, used here** | **6.0 MB** | **8.2%** |
+| model | file | size | word error rate |
+|---|---|---|---|
+| original (float) | | ~39 MB | 3.8% |
+| int8 | `models/citrinet256_int8.mmrt` | 9.8 MB | 6.3% |
+| **int4 (default)** | `models/citrinet256_int4.mmrt` | **6.0 MB** | **8.2%** |
 
 Real microphones in real rooms do worse than clean recordings; expect some misheard words.
 
-## Performance and memory (Waveshare ESP32-S3-CAM, MicroPython)
+Your MicroPython code is the same for either model; the file records its own format.
+The difference is flash space: the int4 model fits the standard 6 MB model partition, and
+the int8 model needs the "int8 layout" (10 MB partition, see Install).
 
-| | |
+```python
+import stt
+import model_tools                          # mpy/examples/model_tools.py
+
+model_tools.info()
+# int4: {'format': 'int4', 'bytes': 5991232, 'int4_layers': 146, 'partition_bytes': 6291456}
+# int8: {'format': 'int8', 'bytes': 9776192, 'int4_layers': 0, 'partition_bytes': 10485760}
+
+text = stt.transcribe(pcm)                  # same call either way
+```
+
+### Loading models from an SD card
+
+The runtime reads the model directly from **flash**, where it can be memory-mapped and
+read at ~32 MB/s. An SD card can't be memory-mapped, and every transcription reads the
+whole model, so running straight from SD would be much slower. (We haven't measured SD
+speed on this board.)
+
+What does work is keeping models on an SD card, or any MicroPython filesystem, and
+installing one into flash from MicroPython:
+
+```python
+import machine, os, model_tools
+os.mount(machine.SDCard(), "/sd")           # pins depend on your board
+model_tools.install("/sd/citrinet256_int4.mmrt")   # writes, verifies, resets the board
+```
+
+Tested from the board's internal filesystem (not an SD card): installing and verifying the
+6 MB int4 model took 48 seconds.
+
+## Performance and memory
+
+Measured on the Waveshare ESP32-S3-CAM, from MicroPython, int4 model. Times include the
+audio feature step.
+
+**Speed**
+
+| task | time |
 |---|---|
-| Transcribe 1 s / 4 s / 10 s of speech | ~0.27 / 0.56 / 1.07 s (plus ~0.05 s per second for audio features) |
-| Speak | ~0.26 s of compute per second of speech |
-| Flash | firmware 3.6 MB (MicroPython 1.7 MB, TTS 1.9 MB), model 6 MB, ~6 MB left for files |
-| PSRAM | ~8.3 MB free when idle; a 4 s transcription uses ~0.2 MB |
-| Internal RAM | the tight one: ~42 KB left free. Bluetooth is disabled to make room |
+| Transcribe 1 s of speech | 0.35 s |
+| Transcribe 2 s of speech | 0.51 s |
+| Transcribe 4 s of speech | 0.83 s |
+| Transcribe 10 s of speech | 1.72 s |
+| Transcribe 1 s, with the 6 MB weight cache | 0.31 s |
+| Transcribe 4 s, with the 6 MB weight cache | 0.79 s |
+| Speak 1 s of speech | 0.26 s |
 
-An optional 6 MB PSRAM cache (`stt.cache(6144)`) makes transcription 5-10% faster.
+The optional weight cache (`stt.cache(6144)`) leaves little PSRAM free, so with it, clips
+are limited to about 4 s under MicroPython.
+
+**Flash (16 MB)**
+
+| item | size |
+|---|---|
+| Firmware (total) | 3.6 MB |
+| of which MicroPython and the camera module | 1.7 MB |
+| of which text to speech (voice 0.34 MB, pronunciation dictionary 1.5 MB) | 1.9 MB |
+| Speech model, int4 | 6.0 MB |
+| Speech model, int8 (int8 layout) | 9.8 MB |
+| Left for your files, int4 layout | 6 MB |
+| Left for your files, int8 layout | 2 MB |
+
+**PSRAM (8 MB)**
+
+| item | size |
+|---|---|
+| Free when idle, speech loaded | 7.9 MB |
+| Used while transcribing 4 s | 0.2 MB |
+| Used by a 4 s spoken reply | 0.4 MB |
+| Optional weight cache | 6 MB |
+
+**Internal RAM** (the scarce one)
+
+| item | size |
+|---|---|
+| Shared block for listening / speaking (they take turns) | 84.5 KB |
+| Text to speech, permanent buffers | 104 KB |
+| Free for your program | ~42 KB |
+
+Bluetooth is disabled in this firmware to make that room.
 
 ## Install
 
-Prebuilt images aren't published yet, so for now you build them (details: `mpy/README.md`).
-
-**1. Build the speech model** (downloads the NVIDIA model and LibriSpeech, then quantizes;
-the 4-bit step takes ~15 minutes on a desktop):
-
-```bash
-mkdir -p data/models/citrinet_256_ls && curl -L -o data/models/citrinet_256_ls/stt_en_citrinet_256_ls.nemo \
-  https://huggingface.co/nvidia/stt_en_citrinet_256_ls/resolve/main/stt_en_citrinet_256_ls.nemo
-# LibriSpeech dev-clean and test-clean (https://www.openslr.org/12) unpacked into data/librispeech/
-cd export
-uv run export_onnx.py --cle && uv run mmrt_quant.py && uv run mmrt_export.py
-uv run int4_gptq.py --keep-io
-uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o ../data/models/mmrt/citrinet256_int4.mmrt
-cd ..
-```
-
-**2. Build the firmware** (MicroPython v1.27.0 with a small patch that lets `machine.I2S`
-drive the codec's master clock):
+**1. Build the firmware** (MicroPython v1.27.0 with a small patch that lets `machine.I2S`
+drive the codec's master clock; more options in [`mpy/README.md`](mpy/README.md)):
 
 ```bash
 REPO=$PWD                                   # this repository
@@ -128,39 +214,59 @@ git clone --depth 1 https://github.com/Ampixa/sanoTTS ~/build/tts/sanoTTS    # o
 cd $REPO && mpy/build.sh
 ```
 
-**3. Flash** (firmware, model, then clear the filesystem area once):
+**2. Flash** the firmware and a model, then clear the filesystem area once:
 
 ```bash
+# int4 model (default layout)
 esptool.py --chip esp32s3 write_flash 0x0 ~/build/sentry-fw/out/firmware-stt.bin \
-  0x410000 data/models/mmrt/citrinet256_int4.mmrt
+  0x410000 models/citrinet256_int4.mmrt
 esptool.py --chip esp32s3 erase_region 0xA10000 0x5F0000
+
+# or: int8 model (int8 layout: same firmware, bigger model partition)
+esptool.py --chip esp32s3 write_flash 0x0 ~/build/sentry-fw/out/firmware-stt.bin \
+  0x410000 models/citrinet256_int8.mmrt
+esptool.py --chip esp32s3 write_flash 0x8000 ~/build/sentry-fw/out/partition-table-int8.bin
+esptool.py --chip esp32s3 erase_region 0xE10000 0x1F0000
 ```
 
-**4. Try it**: press Enter, talk, and the board says back what it heard.
+**3. Try it**: press Enter, talk, and the board says back what it heard.
 
 ```bash
 uv run --with mpremote tools/echo.py
 ```
 
-`mpy/examples/` also has a wake-phrase demo and a speaker demo. The full MicroPython API
-is in `mpy/README.md`.
+`mpy/examples/` also has a wake-phrase demo, a speaker demo and `model_tools.py`. The full
+MicroPython API is in [`mpy/README.md`](mpy/README.md).
+
+**Building the models yourself** (optional; this is how `models/` was made). Download the
+NVIDIA checkpoint and LibriSpeech, then quantize (the int4 step takes ~15 minutes):
+
+```bash
+mkdir -p data/models/citrinet_256_ls && curl -L -o data/models/citrinet_256_ls/stt_en_citrinet_256_ls.nemo \
+  https://huggingface.co/nvidia/stt_en_citrinet_256_ls/resolve/main/stt_en_citrinet_256_ls.nemo
+# LibriSpeech dev-clean and test-clean (https://www.openslr.org/12) unpacked into data/librispeech/
+cd export
+uv run export_onnx.py --cle && uv run mmrt_quant.py && uv run mmrt_export.py    # int8
+uv run int4_gptq.py --keep-io                                                    # int4
+uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o ../data/models/mmrt/citrinet256_int4.mmrt
+```
 
 ## Limitations
 
 - English only, 16 kHz audio. Transcription starts after you stop talking (no live
   streaming), and it is best with one speaker at a time close to the mic.
-- The 4-bit model trades ~2 points of accuracy for size (see the table above).
+- The int4 model trades ~2 points of accuracy for size (see the table above).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
 - Tested on one board. Another ESP32-S3 board needs its own pins and audio codec driver.
 - Listening and speaking take turns (they share one block of internal RAM).
 
 ## Future work
 
-- Recover the 4-bit accuracy loss by fine-tuning with 4-bit weights in place.
+- Recover the int4 accuracy loss by fine-tuning with 4-bit weights in place.
 - Transcribe while you are still talking (streaming).
 - A better voice: larger sanoTTS voices, or a voice distilled from bigger TTS models.
 - Free more internal RAM so the camera, Bluetooth and speech can all run together.
-- Prebuilt firmware and model downloads; more boards; more languages.
+- Prebuilt firmware downloads; more boards; more languages.
 
 ## See also
 
@@ -176,6 +282,88 @@ is in `mpy/README.md`.
   [rvTTS](https://github.com/ArmstrongSubero/rvTTS): other neural TTS on microcontrollers.
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp): Whisper speech recognition for
   PCs, phones and single-board computers (too large for an ESP32).
+- [Meshtastic](https://meshtastic.org/): open LoRa mesh messaging.
 - [NVIDIA NeMo](https://github.com/NVIDIA/NeMo): where Citrinet comes from.
 
+## Credits and licenses
+
+Made by **Thomas Lackner** and **Claude Opus 5.5** (Anthropic's AI model), working together.
+
+The code in this repository is released under the [MIT license](LICENSE), copyright
+Thomas Lackner. Other people's work used here keeps its own license:
+
+- **Speech models** (`models/`): derived from NVIDIA's
+  [stt_en_citrinet_256_ls](https://huggingface.co/nvidia/stt_en_citrinet_256_ls),
+  CC-BY-4.0. Converted and quantized by this project; see [`models/README.md`](models/README.md).
+- **Text to speech**: [sanoTTS](https://github.com/Ampixa/sanoTTS) by Ampixa. The runtime
+  used here is MIT, and its pronunciation dictionary (from misaki) is Apache-2.0.
+  Downloaded at build time, not included here.
+- **MicroPython** (MIT) and **ESP-IDF** (Apache-2.0), downloaded at build time.
+- Parts of the 1x1 convolution kernel are adapted from Espressif's ESP-DL (MIT).
+
 Project history and early design notes: `docs/historical/`.
+
+---
+
+## Appendix: ESP32-S3 benchmarks (Waveshare ESP32-S3-CAM)
+
+Measured with the `bench/` app on an ESP32-S3 (rev v0.2, 240 MHz) with 16 MB QIO flash at
+80 MHz, 8 MB octal PSRAM at 80 MHz, and a 64 KB data cache. These are properties of the
+chip and memory, so they may help with other projects. Terms are explained in the
+glossary below.
+
+**Memory speed**
+
+| memory | read | write |
+|---|---|---|
+| Internal SRAM | 425 MB/s (simple C loop; vector loads go faster) | 760 MB/s |
+| PSRAM, streaming | 88 MB/s | 49 MB/s |
+| Flash, memory-mapped | 32 MB/s | |
+| Flash, `esp_partition_read()` | 12.7 MB/s | |
+| SD card | not measured | |
+
+Flash and PSRAM share one bus, so their traffic takes turns: reading from both at once is
+no faster than reading from one. A second CPU core does not add memory bandwidth.
+
+**Free memory with bare ESP-IDF** (no WiFi): internal RAM 286 KB of 316 KB free (largest
+block 270 KB), PSRAM 8.0 MB free.
+
+**Arithmetic** (8-bit multiply-adds, in GMAC/s)
+
+| setup | GMAC/s |
+|---|---|
+| Theoretical vector peak, one core (16 per cycle at 240 MHz) | 3.84 |
+| MMRT 1x1 kernel, one core, weights in SRAM or cached | ~3.2 |
+| Generic dot-product kernel called per row (ESP-NN), one core, SRAM | 0.68 |
+| Same, two cores, SRAM | 1.35 |
+| Weights streamed from PSRAM, each used once | 0.085 |
+| Weights in PSRAM, each reused for 64 frames, two cores | 1.18 |
+| Weights read in place from flash, reused for 64 frames, two cores | 0.95 |
+
+The lesson: on this chip, speed comes from **reusing each weight many times once it is
+in fast memory**. Streaming weights once per use caps you at the memory speed (88 MB/s of
+8-bit weights is 0.088 GMAC/s), no matter how fast the math units are.
+
+**MMRT kernels:** the 1x1 convolution runs at 1.19 CPU cycles per 16-wide vector
+multiply-add, with operands in SRAM or cached PSRAM. The 4-bit weight unpacking runs at
+5.2 cycles per weight (portable C: 9.3).
+
+**Glossary**
+
+- **MAC / GMAC/s**: a multiply-accumulate is one multiplication added to a running sum, the
+  basic step of a neural network. GMAC/s is billions of them per second.
+- **SRAM** (internal RAM): the ~512 KB of fast memory inside the chip, shared with
+  ESP-IDF, WiFi and MicroPython.
+- **PSRAM**: the external 8 MB RAM chip; bigger and slower than SRAM.
+- **Memory-mapped flash**: flash the CPU reads like RAM, through a cache, without copying.
+- **PIE / SIMD**: the ESP32-S3's vector instructions, which do 16 8-bit operations at once.
+- **int8 / int4 / quantization**: storing a network's numbers as 8- or 4-bit integers
+  instead of 32-bit floats: smaller and faster, slightly less accurate.
+- **GPTQ**: a quantization method that corrects each rounding error using the remaining
+  weights, which keeps accuracy at 4 bits.
+- **CTC**: the output style of the speech model: one letter or word piece (or "nothing")
+  per 80 ms of audio, merged into text.
+- **Word error rate**: the fraction of words a transcript gets wrong (substituted, missing
+  or extra).
+- **LoRa / LoRA**: LoRa is a long-range, very low-bandwidth radio. LoRA (Low-Rank
+  Adaptation) is a way to adapt a neural network by adding small trainable matrices.

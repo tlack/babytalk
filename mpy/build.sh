@@ -40,4 +40,7 @@ B="build-$BOARD"
 python -m esptool --chip esp32s3 merge_bin -o "$FW/out/firmware-stt.bin" --flash_mode keep --flash_freq keep --flash_size keep \
     0x0 "$B/bootloader/bootloader.bin" 0x8000 "$B/partition_table/partition-table.bin" \
     0x10000 "$B/micropython.bin"
-ls -l "$FW/out/firmware-stt.bin" "$B/micropython.bin"
+# int8-model layout (10MB model partition): same app, flash this table at 0x8000 on top
+python "$IDF_PATH/components/partition_table/gen_esp32part.py" \
+    "$HERE/boards/$BOARD/partitions-stt-int8.csv" "$FW/out/partition-table-int8.bin" >/dev/null
+ls -l "$FW/out/firmware-stt.bin" "$B/micropython.bin" "$FW/out/partition-table-int8.bin"

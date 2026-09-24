@@ -695,6 +695,27 @@ static int handle(Out &o, char *line)
         psram_free(pcm);
         return rc;
     }
+    if (!strcmp(argv[0], "fe")) {  // fe <n_samples> + PCM: the board's int8 model input ("FEATS")
+        int n = a1, T = stt_num_frames(n), rc = 1;
+        int16_t *pcm = (int16_t *)psram_alloc((size_t)n * 2);
+        float *feats = (float *)psram_alloc(sizeof(float) * T * MEL_N);
+        float *scratch = (float *)heap_caps_malloc(sizeof(float) * stt_scratch_floats(), MALLOC_CAP_INTERNAL);
+        int16_t *q16 = (int16_t *)psram_alloc((size_t)T * MEL_N * 2);
+        int8_t *q8 = (int8_t *)psram_alloc((size_t)T * MEL_N);
+        if (pcm && feats && scratch && q16 && q8 && recv_all(o.fd, pcm, (size_t)n * 2) == 0) {
+            int64_t t0 = esp_timer_get_time();
+            stt_features(pcm, n, feats, scratch);
+            int64_t fe_us = esp_timer_get_time() - t0;
+            stt_fill_quant(feats, T, q16, T, g_model.tensors[g_model.hdr->input].exp);
+            for (int i = 0; i < T * MEL_N; i++) q8[i] = q16[i] > 127 ? 127 : (q16[i] < -128 ? -128 : q16[i]);
+            o.printf("{\"fe_us\":%lld,\"T\":%d}\n", (long long)fe_us, T);
+            o.printf("FEATS %d\n", T * MEL_N);
+            o.write(q8, (size_t)T * MEL_N);
+            rc = 0;
+        }
+        psram_free(pcm); psram_free(feats); heap_caps_free(scratch); psram_free(q16); psram_free(q8);
+        return rc;
+    }
     if (!strcmp(argv[0], "prof")) {  // prof <T> + T*80 int8: per-op timing ("OPS" line) + 1x1 split
         int T = a1, n = (int)g_model.hdr->n_ops;
         int8_t *x = (int8_t *)psram_alloc((size_t)T * MEL_N);

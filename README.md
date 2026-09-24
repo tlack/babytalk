@@ -1,7 +1,9 @@
-# esp32-micromodels: offline speech to text (and back) on an ESP32-S3
+# BabyTalk
 
-An ESP32-S3 that **understands what you say and talks back, with no cloud and no
-internet**, driven from MicroPython:
+![BabyTalk: small AI models for speech to text and text to speech on ESP32 microcontrollers](docs/babytalk-splash.png)
+
+**BabyTalk** makes an ESP32-S3 that **understands what you say and talks back, with no
+cloud and no internet**, driven from MicroPython:
 
 ```python
 import stt, tts
@@ -20,7 +22,7 @@ Most "voice on ESP32" projects do one of two things:
 - **recognize a fixed list of commands or wake words** that were trained in advance
   (e.g. ESP-SR's MultiNet, Edge Impulse / TensorFlow Lite Micro keyword spotting).
 
-This project is different: a **general-purpose English speech recognizer** that runs
+BabyTalk is different: a **general-purpose English speech recognizer** that runs
 entirely on the chip. It writes down *any* sentence, with no training and no command list.
 A wake phrase is any phrase you type ("wake up, tomato face"), also with no training.
 Optionally the same firmware **speaks** replies with an on-device neural voice.
@@ -73,7 +75,8 @@ text -> pronunciation dictionary -> phonemes -> sanoTTS voice -> 24 kHz audio ->
 
 ### MMRT, the runtime
 
-The model runs on **MMRT** (`mmrt/`), a small inference engine written for this project.
+The model runs on **MMRT** (`mmrt/`, the "micromodels runtime"), a small inference engine
+written for BabyTalk and meant to host other small models later.
 We started with Espressif's ESP-DL. It gave correct results but took 1.33 s to process
 each second of audio, because it re-read every layer's weights from flash for every frame
 of audio and used one core. Fixing that meant patching ESP-DL, which nobody else could easily
@@ -287,7 +290,8 @@ uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o ../data
 
 ## Credits and licenses
 
-Made by **Thomas Lackner** and **Claude Opus 5.5** (Anthropic's AI model), working together.
+BabyTalk was made by **Thomas Lackner** and **Claude Opus 5.5** (Anthropic's AI model),
+working together.
 
 The code in this repository is released under the [MIT license](LICENSE), copyright
 Thomas Lackner. Other people's work used here keeps its own license:

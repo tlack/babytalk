@@ -196,6 +196,16 @@ as a data generator:
 - Pipeline lives in `datagen/`: text sampler → TTS fan-out (resumable job queue, one
   worker per engine) → silence trim → augmentation → sharded manifests.
 
+## 3b. Status (2026-09-23): on-device STT works
+
+Stock NVIDIA Citrinet-256 (no retraining), ESP-PPQ w8a16, ESP-DL on the S3, weights in
+place from flash: **7.7% WER on live voice through the board's own mic at 2.4× real
+time**; int8 9.2% at 1.33×. Host float is 3.76% on LibriSpeech test-clean. Details:
+`stt/RESULTS.md`, `export/RESULTS.md`. The quantization sim on the host predicts
+on-device transcripts, so accuracy work stays on the PC. Next levers, in order:
+QAT (int8 accuracy at int8 speed), an own row-reuse 1x1-conv kernel on both cores
+(87% of runtime; ~3× per core headroom measured), then the MoE / TTS-data work.
+
 ## 4. Phases
 
 ### Phase 0 — Measure the hardware (gates everything)

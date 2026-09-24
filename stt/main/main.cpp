@@ -137,7 +137,16 @@ static int run_and_decode(Out &o, int T, int mode, double fe_ms, int n_samples, 
     int frames = stt_out_frames(T);
     static char text[1024];
     t0 = esp_timer_get_time();
-    stt_ctc_greedy((const int16_t *)out->data, frames, VOCAB_N, VOCAB, text, sizeof(text));
+    const int16_t *logits = (const int16_t *)out->data;
+    int16_t *wide = NULL;
+    if (out->dtype == dl::DATA_TYPE_INT8) {  // int8 model: widen for the decoder
+        size_t n = (size_t)frames * (VOCAB_N + 1);
+        wide = (int16_t *)heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM);
+        for (size_t i = 0; i < n; i++) wide[i] = ((const int8_t *)out->data)[i];
+        logits = wide;
+    }
+    stt_ctc_greedy(logits, frames, VOCAB_N, VOCAB, text, sizeof(text));
+    heap_caps_free(wide);
     int64_t dec_us = esp_timer_get_time() - t0;
 
     // text is lowercase letters, spaces and apostrophes: safe inside a JSON string.
@@ -217,7 +226,15 @@ static int handle(Out &o, char *line)
             dl::TensorBase *in = io_tensor(true);
             int64_t t0 = esp_timer_get_time();
             stt_features(pcm, n, feats, scratch);
-            stt_fill_quant(feats, T, (int16_t *)in->data, want, (int)in->exponent);
+            if (in->dtype == dl::DATA_TYPE_INT8) {  // int8 model: saturate to int8
+                int16_t *tmp = (int16_t *)heap_caps_malloc((size_t)want * MEL_N * 2, MALLOC_CAP_SPIRAM);
+                stt_fill_quant(feats, T, tmp, want, (int)in->exponent);
+                for (size_t i = 0; i < (size_t)want * MEL_N; i++)
+                    ((int8_t *)in->data)[i] = tmp[i] > 127 ? 127 : (tmp[i] < -128 ? -128 : tmp[i]);
+                heap_caps_free(tmp);
+            } else {
+                stt_fill_quant(feats, T, (int16_t *)in->data, want, (int)in->exponent);
+            }
             double fe_ms = (esp_timer_get_time() - t0) / 1000.0;
             rc = run_and_decode(o, T, a2, fe_ms, n, false);
         }

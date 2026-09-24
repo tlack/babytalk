@@ -33,6 +33,14 @@ typedef struct {
 void mmrt_s3_dw_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dw_t *a);
 
 typedef struct {
+    int nrows, pairs, C, groups, K16, rowstride, shift, relu;
+    const uint8_t *rnd;  // 64-byte QACC image: 2^(shift-1) in every lane
+    int odd;
+} mmrt_s3_dwr_t;
+
+void mmrt_s3_dw_rows(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dwr_t *a);
+
+typedef struct {
     int groups;
     int shift;
     int relu;
@@ -187,13 +195,33 @@ typedef struct {
     int T_in, C, K, stride, pad, shift, relu, T_out;
 } dw_job_t;
 
+int mmrt_s3_dw_fast = 1;  // 1: interior frames via mmrt_s3_dw_rows
+
 static void dw_part(void *arg, int part)
 {
     dw_job_t *j = (dw_job_t *)arg;
     mmrt_s3_dw_t a = {0, j->C, j->C / 16, j->K * 16, j->shift, j->relu};
     int b, e;
     part_range(j->T_out, part, &b, &e);
+    // interior frames: every tap inside the clip
+    int in0 = (j->pad + j->stride - 1) / j->stride;                   // first t with start >= 0
+    int in1 = j->T_in - j->K + j->pad >= 0 ? (j->T_in - j->K + j->pad) / j->stride + 1 : 0;  // first t past the end
+    if (in0 < b) in0 = b;
+    if (in1 > e) in1 = e;
+    if (!mmrt_s3_dw_fast || in1 <= in0 || j->K < 3) in0 = in1 = e;
     for (int t = b; t < e; t++) {
+        if (t == in0) {
+            static DRAM_ATTR uint8_t rnd_core[2][64] __attribute__((aligned(16)));
+            uint8_t *rnd = rnd_core[part == 1];
+            int32_t r[16];
+            for (int i = 0; i < 16; i++) r[i] = j->shift > 0 ? 1 << (j->shift - 1) : 0;
+            pack_bias(r, 16, rnd);
+            int odd = j->K & 1, pairs = odd ? (j->K - 3) / 2 : (j->K - 2) / 2;
+            mmrt_s3_dwr_t ra = {in1 - in0, pairs, j->C, j->C / 16, j->K * 16, j->stride * j->C, j->shift, j->relu, rnd, odd};
+            mmrt_s3_dw_rows(j->y + (size_t)t * j->C, j->x + (size_t)(t * j->stride - j->pad) * j->C, j->w, &ra);
+            t = in1 - 1;
+            continue;
+        }
         int start = t * j->stride - j->pad;  // input frame of tap 0
         int k0 = start < 0 ? -start : 0;
         int k1 = start + j->K > j->T_in ? j->T_in - start : j->K;

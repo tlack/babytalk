@@ -672,6 +672,12 @@ static int handle(Out &o, char *line)
         o.printf("{\"cores\":%d}\n", a1);
         return 0;
     }
+    if (!strcmp(argv[0], "dwfast")) {
+        extern int mmrt_s3_dw_fast;
+        mmrt_s3_dw_fast = a1;
+        o.printf("{\"dw_fast\":%d}\n", a1);
+        return 0;
+    }
     if (!strcmp(argv[0], "stage")) {  // stage 0|1: SRAM-stage 1x1 weights
         mmrt_s3_stage = a1;
         o.printf("{\"stage\":%d}\n", a1);
@@ -694,6 +700,26 @@ static int handle(Out &o, char *line)
         }
         psram_free(pcm);
         return rc;
+    }
+    if (!strcmp(argv[0], "dwbench")) {  // dwbench <K>: same dw layer, input in SRAM vs PSRAM
+        const int C = 256, K = a1 > 0 ? a1 : 13, T = 96, pad = K / 2;
+        int8_t *w = (int8_t *)psram_alloc(C * K), *y = (int8_t *)psram_alloc(T * C);
+        int8_t *xp = (int8_t *)psram_alloc(T * C);
+        int8_t *xs = (int8_t *)heap_caps_aligned_alloc(16, T * C, MALLOC_CAP_INTERNAL);
+        for (int i = 0; i < C * K; i++) w[i] = rnd8();
+        for (int i = 0; i < T * C; i++) xp[i] = rnd8();
+        if (xs) memcpy(xs, xp, T * C);
+        for (int where = 0; where < 2; where++) {
+            const int8_t *x = where ? xs : xp;
+            if (!x) continue;
+            int64_t t0 = esp_timer_get_time();
+            for (int r = 0; r < 10; r++) mmrt_s3_dwconv(x, T, C, w, K, 1, pad, 7, 0, y, T);
+            int64_t us = (esp_timer_get_time() - t0) / 10;
+            o.printf("{\"x_in\":\"%s\",\"K\":%d,\"cores\":%d,\"us\":%lld,\"gmacs\":%.2f}\n", where ? "sram" : "psram", K,
+                     mmrt_s3_cores, (long long)us, (double)T * C * K / us / 1000.0);
+        }
+        psram_free(w); psram_free(y); psram_free(xp); heap_caps_free(xs);
+        return 0;
     }
     if (!strcmp(argv[0], "fe")) {  // fe <n_samples> + PCM: the board's int8 model input ("FEATS")
         int n = a1, T = stt_num_frames(n), rc = 1;

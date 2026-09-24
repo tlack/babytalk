@@ -672,6 +672,11 @@ static int handle(Out &o, char *line)
         o.printf("{\"cores\":%d}\n", a1);
         return 0;
     }
+    if (!strcmp(argv[0], "fuse")) {  // fuse 0|1: depthwise -> 1x1 fusion
+        mmrt_s3_fuse = a1;
+        o.printf("{\"fuse\":%d}\n", a1);
+        return 0;
+    }
     if (!strcmp(argv[0], "stream")) {  // stream <max_T>: weight streaming below this input length
         mmrt_s3_stream_max_T = a1;
         o.printf("{\"stream_max_T\":%d}\n", a1);

@@ -169,6 +169,36 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             }
         }
 #endif
+#ifdef MMRT_S3
+        // depthwise -> 1x1 whose only consumer it is: fused, the intermediate stays in SRAM
+        if (!mmrt_use_ref && op->kind == MMRT_DWCONV && i + 1 < n_ops && m->ops[i + 1].kind == MMRT_CONV1X1 &&
+            m->ops[i + 1].in0 == op->out && last[op->out] == i + 1 && m->ops[i + 1].stride == 1) {
+            const mmrt_op_t *pw = &m->ops[i + 1];
+            const int Tx = m->T[op->in0], Cx = m->tensors[op->in0].channels, N = m->tensors[pw->out].channels;
+            const int T = conv_out_len(Tx, op->K, op->stride, op->pad);
+            int8_t *y = (int8_t *)alloc((size_t)T * N);
+            if (!y) {
+                STREAM_END();
+                free(last);
+                return NULL;
+            }
+            const int32_t *b = pw->b_off != 0xffffffffu ? (const int32_t *)(m->blob + pw->b_off) : NULL;
+            if (mmrt_s3_dw_pw(m->buf[op->in0], Tx, Cx, (const int8_t *)(m->blob + op->w_off), op->K, op->stride,
+                              op->pad, op->shift, op->relu, (const int8_t *)(m->blob + pw->w_off), b, N, pw->shift,
+                              pw->relu, y, T)) {
+                m->buf[pw->out] = y;
+                m->T[pw->out] = T;
+                if (mmrt_trace) mmrt_trace(i + 1, pw, y, T, N);
+                if (last[op->in0] <= i + 1 && op->in0 != h->input && m->buf[op->in0]) {
+                    release(m->buf[op->in0]);
+                    m->buf[op->in0] = NULL;
+                }
+                i += 1;
+                continue;
+            }
+            release(y);
+        }
+#endif
         const int8_t *x = m->buf[op->in0];
         const int Tx = m->T[op->in0], Cx = m->tensors[op->in0].channels, Cy = m->tensors[op->out].channels;
         int Ty = Tx;

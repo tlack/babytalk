@@ -28,6 +28,13 @@ void mmrt_s3_tail(const int8_t *a, const int8_t *s, const int8_t *r, int T, int 
 // Same as mmrt_mean_ref; column sums in QACC (T * 128 must stay below 2^19).
 void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y);
 
+// Fused depthwise -> 1x1 (the depthwise output stays in SRAM tiles). Returns 0 if the
+// shapes don't fit (then run the two ops separately). Same results as the two kernels.
+extern int mmrt_s3_fuse;
+int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, int stride, int pad, int dw_shift,
+                  int dw_relu, const int8_t *pw_w, const int32_t *bias, int N, int pw_shift, int pw_relu, int8_t *y,
+                  int T);
+
 // Weight streaming for short inputs (see mmrt_s3.c): the executor lists its 1x1 ops in
 // execution order and brackets the run with begin/end; begin returns 0 when streaming
 // isn't used (long input, one core, ...), and the kernels then run as usual.

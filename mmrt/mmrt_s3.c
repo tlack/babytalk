@@ -316,12 +316,11 @@ typedef struct {
 
 int mmrt_s3_dw_fast = 1;  // 1: interior frames via mmrt_s3_dw_rows
 
-static void dw_part(void *arg, int part)
+// Depthwise output frames [b, e) written to ydst (frame b first, rows C bytes apart):
+// the tensor itself, or a fused op's SRAM tile. core picks the rounding-constant buffer.
+static void dw_frames(const dw_job_t *j, int b, int e, int8_t *ydst, int core)
 {
-    dw_job_t *j = (dw_job_t *)arg;
     mmrt_s3_dw_t a = {0, j->C, j->C / 16, j->K * 16, j->shift, j->relu};
-    int b, e;
-    part_range(j->T_out, part, &b, &e);
     // interior frames: every tap inside the clip
     int in0 = (j->pad + j->stride - 1) / j->stride;                   // first t with start >= 0
     int in1 = j->T_in - j->K + j->pad >= 0 ? (j->T_in - j->K + j->pad) / j->stride + 1 : 0;  // first t past the end
@@ -331,13 +330,13 @@ static void dw_part(void *arg, int part)
     for (int t = b; t < e; t++) {
         if (t == in0) {
             static DRAM_ATTR uint8_t rnd_core[2][64] __attribute__((aligned(16)));
-            uint8_t *rnd = rnd_core[part == 1];
+            uint8_t *rnd = rnd_core[core];
             int32_t r[16];
             for (int i = 0; i < 16; i++) r[i] = j->shift > 0 ? 1 << (j->shift - 1) : 0;
             pack_bias(r, 16, rnd);
             int odd = j->K & 1, pairs = odd ? (j->K - 3) / 2 : (j->K - 2) / 2;
             mmrt_s3_dwr_t ra = {in1 - in0, pairs, j->C, j->C / 16, j->K * 16, j->stride * j->C, j->shift, j->relu, rnd, odd};
-            mmrt_s3_dw_rows(j->y + (size_t)t * j->C, j->x + (size_t)(t * j->stride - j->pad) * j->C, j->w, &ra);
+            mmrt_s3_dw_rows(ydst + (size_t)(t - b) * j->C, j->x + (size_t)(t * j->stride - j->pad) * j->C, j->w, &ra);
             t = in1 - 1;
             continue;
         }
@@ -345,8 +344,82 @@ static void dw_part(void *arg, int part)
         int k0 = start < 0 ? -start : 0;
         int k1 = start + j->K > j->T_in ? j->T_in - start : j->K;
         a.nk = k1 - k0;
-        mmrt_s3_dw_row(j->y + (size_t)t * j->C, j->x + (size_t)(start + k0) * j->C, j->w + k0 * 16, &a);
+        mmrt_s3_dw_row(ydst + (size_t)(t - b) * j->C, j->x + (size_t)(start + k0) * j->C, j->w + k0 * 16, &a);
     }
+}
+
+static void dw_part(void *arg, int part)
+{
+    dw_job_t *j = (dw_job_t *)arg;
+    int b, e;
+    part_range(j->T_out, part, &b, &e);
+    dw_frames(j, b, e, j->y + (size_t)b * j->C, part == 1);
+}
+
+// ---------------------------------------------------------------- fused depthwise -> 1x1
+// The depthwise output never touches PSRAM: each core computes it 16 frames at a time
+// into its own SRAM tile and runs the 1x1 over the tile straight away. Short inputs are
+// bus-bound, and this removes a write + read of a [T][C] tensor per pair of ops.
+// The 1x1 weights are staged as two halves in the two separate-bank buffers; core 0
+// runs half A then B per tile, core 1 B then A, so they tend to read different banks.
+#define TILE 16
+#define TILE_C 256
+static DRAM_ATTR int8_t s_tile[2][TILE * TILE_C] __attribute__((aligned(16)));
+
+typedef struct {
+    dw_job_t dw;         // dw.y unused
+    int8_t *y;           // 1x1 output [T][N]
+    int N, T;
+    const int8_t *wA, *wB;
+    mmrt_s3_c1_t aA, aB;  // groups [0, aA.groups) in wA, the rest in wB
+} fused_job_t;
+
+static void fused_part(void *arg, int part)
+{
+    fused_job_t *j = (fused_job_t *)arg;
+    const int core = part == 1, C = j->dw.C;
+    int b, e;
+    part_range(j->T, part, &b, &e);
+    int8_t *tile = s_tile[core];
+    for (int t0 = b; t0 < e; t0 += TILE) {
+        int t1 = t0 + TILE < e ? t0 + TILE : e;
+        dw_frames(&j->dw, t0, t1, tile, core);
+        for (int pass = 0; pass < 2; pass++) {
+            int useB = pass ^ core;
+            const mmrt_s3_c1_t *a = useB ? &j->aB : &j->aA;
+            if (!a->groups) continue;
+            const int8_t *w = useB ? j->wB : j->wA;
+            int col = useB ? j->aA.groups * 16 : 0;
+            for (int t = t0; t < t1; t++)
+                mmrt_s3_conv1x1_row(j->y + (size_t)t * j->N + col, tile + (size_t)(t - t0) * C, w, a);
+        }
+    }
+}
+
+int mmrt_s3_fuse = 1;
+
+int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, int stride, int pad, int dw_shift,
+                  int dw_relu, const int8_t *pw_w, const int32_t *bias, int N, int pw_shift, int pw_relu, int8_t *y,
+                  int T)
+{
+    const int G = N / 16, gA = G / 2;
+    const size_t gb = (size_t)C * 16;
+    if (!mmrt_s3_fuse || S.active || C > TILE_C || (size_t)(G - gA) * gb > W_STAGE_BYTES ||
+        (size_t)gA * gb > W_STAGE_BYTES || K < 3)
+        return 0;
+    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
+    if (!s_wstage1) return 0;
+    int64_t t0 = esp_timer_get_time();
+    memcpy(s_wstage0, pw_w, (size_t)gA * gb);
+    memcpy(s_wstage1, pw_w + (size_t)gA * gb, (size_t)(G - gA) * gb);
+    mmrt_s3_stage_us[0] += esp_timer_get_time() - t0;
+    if (bias) pack_bias(bias, N, s_bias_q);
+    fused_job_t j = {{x, dw_w, NULL, T_in, C, K, stride, pad, dw_shift, dw_relu, T},
+                     y, N, T, s_wstage0, s_wstage1,
+                     {bias ? s_bias_q : NULL, C / 16 - 1, gA, pw_shift, pw_relu},
+                     {bias ? s_bias_q + (size_t)gA * 64 : NULL, C / 16 - 1, G - gA, pw_shift, pw_relu}};
+    run_parts(fused_part, &j);
+    return 1;
 }
 
 void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,

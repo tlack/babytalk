@@ -107,6 +107,10 @@ Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at 128×128 (~100M MACs)
   - **Two-pass is natural:** show a fast small-model draft immediately, then replace it
     with a slower, better pass (bigger model or routed experts from flash).
   - Streaming stays a later option for dictation / always-on use, not a requirement.
+  - **Non-real-time STT is still valuable on its own:** voice memos and notes transcribed
+    in the background, searchable logs of what was said near a node, commands where a
+    second or two of latency is fine — all offline, private, and without a server.
+    Success criterion: good WER at *some* acceptable wait, not RTF < 1.
 - **Toolchain:** ESP-DL (int8/int16) + ESP-PPQ quantization from PyTorch → ONNX
   (opset 18). ESP-SR for the audio front end (AFE) only (not MultiNet — that's a fixed-phrase list, not open vocab).
 - **ESP-DL already implements much of the tier plumbing** (ref [1], `dl::Model`):

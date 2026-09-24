@@ -28,6 +28,9 @@ LIBRI = DATA / "librispeech" / "LibriSpeech"
 
 
 # ----------------------------------------------------------------------------- model
+CONV_MASK = True  # False: mask only inside SE (experiment: cheaper static-graph masking)
+
+
 def _mask(x: torch.Tensor, lens: torch.Tensor | None) -> torch.Tensor:
     if lens is None:
         return x
@@ -52,9 +55,9 @@ class SepConvBN(nn.Module):
         self.bn = nn.BatchNorm1d(cout, eps=1e-3)
 
     def forward(self, x, lens=None):
-        x = self.dw(_mask(x, lens))
+        x = self.dw(_mask(x, lens) if CONV_MASK else x)
         lens = _conv_len(lens, self.k, self.stride, self.pad)
-        x = self.pw(_mask(x, lens))
+        x = self.pw(_mask(x, lens) if CONV_MASK else x)
         return self.bn(x), lens
 
 
@@ -68,7 +71,7 @@ class ConvBN(nn.Module):
         self.bn = nn.BatchNorm1d(cout, eps=1e-3)
 
     def forward(self, x, lens=None):
-        return self.bn(self.conv(_mask(x, lens))), _conv_len(lens, self.k, self.stride, self.pad)
+        return self.bn(self.conv(_mask(x, lens) if CONV_MASK else x)), _conv_len(lens, self.k, self.stride, self.pad)
 
 
 class SqueezeExcite(nn.Module):

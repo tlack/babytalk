@@ -13,9 +13,17 @@ import soundfile as sf
 from tts import Voices
 
 POS = ["{w}", "{w}.", "{w}, turn on the lights", "{w}, what time is it", "okay, {w}", "{w}, play some music"]
-NEG = ["hey tomato", "tomato face", "hey there", "tomato sauce", "hey thomas", "the tomatoes are ripe",
-       "face the music", "hey tom", "okay computer", "turn on the lights", "hey, it's time to face the day",
-       "a tomato fell on my face", "potato face", "hey tamara"]
+GENERIC_NEG = ["hey there", "tomato sauce", "the tomatoes are ripe", "face the music", "okay computer",
+               "turn on the lights", "it's time to face the day", "a tomato fell on my face", "potato face",
+               "make up your face", "wake up, it's late", "take it to my place", "wait, what time is it"]
+
+
+def hard_negatives(phrase: str) -> list[str]:
+    """The phrase's own pieces (every contiguous run of words that isn't the whole
+    phrase, e.g. 'wake up', 'tomato face'), plus generic confusables."""
+    w = phrase.replace(",", "").split()
+    parts = {" ".join(w[i:j]) for i in range(len(w)) for j in range(i + 1, len(w) + 1) if (i, j) != (0, len(w))}
+    return sorted(parts) + GENERIC_NEG
 
 
 def main():
@@ -33,7 +41,7 @@ def main():
     for i, spec in enumerate(specs):
         for speed in (0.9, 1.0, 1.15):
             items = [(t.format(w=a.phrase), 1) for t in rng.choice(POS, 2, replace=False)]
-            items += [(t, 0) for t in rng.choice(NEG, 3, replace=False)]
+            items += [(t, 0) for t in rng.choice(hard_negatives(a.phrase), 3, replace=False)]
             for text, label in items:
                 pcm = v.say(text, spec, speed=speed, noise=float(rng.uniform(0.5, 0.8)))
                 pad = np.zeros(int(16000 * rng.uniform(0.2, 0.5)), np.int16)  # leading/trailing silence

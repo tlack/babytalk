@@ -189,6 +189,8 @@ def main():
     ap.add_argument("--data", default=str(Path(__file__).resolve().parent.parent / "data" / "kws" / "tomatoface"))
     ap.add_argument("--libri", type=int, default=200, help="also score N LibriSpeech test-clean utterances (negatives)")
     ap.add_argument("--tokens", action="store_true")
+    ap.add_argument("--save", default=None, help="write a phrase file for tools/wake.py (spellings + auto threshold)")
+    ap.add_argument("--margin", type=float, default=3.0, help="auto threshold = hardest negative + margin")
     ap.add_argument("--enroll", type=int, default=8, help="voices whose positives enroll spellings (held out of eval)")
     a = ap.parse_args()
     m = Model()
@@ -199,7 +201,7 @@ def main():
     if enroll_voices:
         heard = []
         for r in rows:
-            if r["label"] and (r["voice"], r["speaker"]) in enroll_voices and r["text"].rstrip(".").lower() == a.phrase.split("|")[0]:
+            if r["label"] and (r["voice"], r["speaker"]) in enroll_voices and normalize(r["text"]) == normalize(a.phrase.split("|")[0]):
                 pcm, _ = sf.read(Path(a.data) / r["wav"], dtype="int16")
                 lg = m.logits_cached(Path(a.data).name + "-" + r["wav"], pcm)
                 heard.append(ctc_text(lg, m.vocab_list))
@@ -234,8 +236,18 @@ def main():
     neg = np.array([s for s, l, *_ in res if not l])
     print(f"positives: {len(pos)}  median {np.median(pos):.1f}  10th pct {np.percentile(pos, 10):.1f}  min {pos.min():.1f}")
     print(f"negatives: {len(neg)}  median {np.median(neg):.1f}  90th pct {np.percentile(neg, 90):.1f}  max {neg.max():.1f}")
-    for thr in sorted({round(x, 1) for x in [-2, -4, -6, -8, -10, -12, -15]}, reverse=True):
+    for thr in sorted({round(x, 1) for x in [-2, -5, -10, -15, -18, -20, -22, -24]}, reverse=True):
         print(f"  threshold {thr:6.1f}: detect {100 * (pos >= thr).mean():5.1f}%   false wakes {int((neg >= thr).sum())}/{len(neg)}")
+    if a.save:
+        thr = min(-1.0, round(float(neg.max()) + a.margin, 1))
+        spellings = phrase.split("|")
+        Path(a.save).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.save).write_text(json.dumps({"phrase": a.phrase.split("|")[0], "spellings": spellings,
+                                            "threshold": thr, "detect": round(float((pos >= thr).mean()), 3),
+                                            "false_wakes": int((neg >= thr).sum()), "negatives": len(neg)},
+                                           indent=2) + "\n")
+        print(f"-> {a.save}: {len(spellings)} spellings, threshold {thr} "
+              f"(detects {100 * (pos >= thr).mean():.1f}% of held-out positives, 0 of {len(neg)} negatives)")
     print("hardest negatives:")
     for s, l, text, voice in sorted([r for r in res if not r[1]], reverse=True)[:6]:
         print(f"  {s:7.1f}  {text!r}  ({voice})")

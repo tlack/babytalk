@@ -11,6 +11,12 @@
 //                            record from the board's mic now: streams "LEVEL <dBFS> <ms>"
 //                            lines while recording, then trims silence (trim=1) and
 //                            transcribes; send_audio=1 also returns "AUDIO <bytes>" + PCM
+//   wake <threshold> <spelling>|<spelling>...
+//                            wake-phrase mode: listens continuously (energy VAD gates the
+//                            model), streams "SEG <ms> <score> <text>" per speech stretch,
+//                            "WAKE <score>" on a match, then "CMD <text>" for the command
+//                            (the rest of that breath, or the next stretch within 5 s).
+//                            Runs until the client sends a line or disconnects.
 //   info                     model summary + memory
 // Every inference reply includes per-op-kind timings ("ops_ms").
 //
@@ -32,6 +38,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
+#include "kws.h"
 #include "mic.h"
 #include "mmrt.h"
 #include "mmrt_ref.h"
@@ -88,10 +95,15 @@ static void psram_free(void *p) { heap_caps_free(p); }
 
 static void heap_line(Out &o, const char *when)
 {
-    o.printf("{\"when\":\"%s\",\"internal_free\":%u,\"psram_free\":%u,\"internal_largest\":%u}\n", when,
+    o.printf("{\"when\":\"%s\",\"internal_free\":%u,\"psram_free\":%u,\"internal_largest\":%u,"
+             "\"internal_total\":%u,\"psram_total\":%u,\"internal_min_free\":%u,\"psram_min_free\":%u}\n", when,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
 }
 
 static int load_model(Out &o)
@@ -177,6 +189,39 @@ static int infer(Out &o, const int8_t *x, int T, double fe_ms, int n_samples, bo
         o.write(y, (size_t)T_out * C);
     }
     return 0;
+}
+
+// PCM -> int8 logits [*T_out][stride] (owned by the model until the next run) + text.
+static const int8_t *run_pcm(const int16_t *pcm, int n, int *T_out, char *text, size_t cap, double *ms)
+{
+    int T = stt_num_frames(n);
+    if (n < MEL_HOP || T > STT_WIN_FRAMES) return NULL;
+    int64_t t0 = esp_timer_get_time();
+    float *feats = (float *)psram_alloc(sizeof(float) * T * MEL_N);
+    float *scratch = (float *)heap_caps_malloc(sizeof(float) * stt_scratch_floats(), MALLOC_CAP_INTERNAL);
+    int16_t *q16 = (int16_t *)psram_alloc((size_t)T * MEL_N * 2);
+    int8_t *q8 = (int8_t *)psram_alloc((size_t)T * MEL_N);
+    const int8_t *y = NULL;
+    if (feats && scratch && q16 && q8) {
+        stt_features(pcm, n, feats, scratch);
+        stt_fill_quant(feats, T, q16, T, g_model.tensors[g_model.hdr->input].exp);
+        for (int i = 0; i < T * MEL_N; i++) q8[i] = q16[i] > 127 ? 127 : (q16[i] < -128 ? -128 : q16[i]);
+        y = mmrt_run(&g_model, q8, T, T_out, psram_alloc, psram_free);
+    }
+    psram_free(feats);
+    heap_caps_free(scratch);
+    psram_free(q16);
+    psram_free(q8);
+    if (y && text) {
+        const int C = g_model.tensors[g_model.hdr->output].channels, V = (int)g_model.hdr->out_valid;
+        int16_t *wide = (int16_t *)psram_alloc((size_t)*T_out * V * 2);
+        for (int t = 0; t < *T_out; t++)
+            for (int v = 0; v < V; v++) wide[t * V + v] = y[t * C + v];
+        stt_ctc_greedy(wide, *T_out, VOCAB_N, VOCAB, text, cap);
+        psram_free(wide);
+    }
+    if (ms) *ms = (esp_timer_get_time() - t0) / 1000.0;
+    return y;
 }
 
 // PCM -> features -> int8 model input -> infer.
@@ -432,8 +477,172 @@ static int ktest(Out &o)
     return fails;
 }
 
+// ---------------------------------------------------------------- wake-phrase mode
+#define RING_SAMPLES (8 * 16000)  // 8 s of audio
+#define BLOCK 320                 // 20 ms
+static int16_t *s_ring;
+static volatile uint32_t s_ring_head;  // total samples ever written
+static TaskHandle_t s_listener;
+static volatile bool s_mic_run;
+
+static void mic_task(void *)
+{
+    static int16_t blk[BLOCK];
+    while (s_mic_run) {
+        if (mic_read_mono(blk, BLOCK)) continue;
+        uint32_t h = s_ring_head;
+        for (int i = 0; i < BLOCK; i++) s_ring[(h + i) % RING_SAMPLES] = blk[i];
+        s_ring_head = h + BLOCK;
+        if (s_listener) xTaskNotifyGive(s_listener);
+    }
+    vTaskDelete(NULL);
+}
+
+// Copy ring samples [from, to) (absolute sample numbers) into dst.
+static void ring_copy(int16_t *dst, uint32_t from, uint32_t to)
+{
+    for (uint32_t i = from; i < to; i++) *dst++ = s_ring[i % RING_SAMPLES];
+}
+
+static float block_db(uint32_t at)
+{
+    double sq = 0;
+    for (int i = 0; i < BLOCK; i++) {
+        double v = s_ring[(at + i) % RING_SAMPLES];
+        sq += v * v;
+    }
+    return 10.0f * log10f((float)(sq / BLOCK) + 1.0f) - 90.3f;
+}
+
+static bool client_wants_stop(int fd)
+{
+    char c;
+    int k = recv(fd, &c, 1, MSG_DONTWAIT | MSG_PEEK);
+    return k == 0 || (k > 0);  // closed, or sent anything
+}
+
+static int cmd_wake(Out &o, float thr, char *spellings)
+{
+    static kws_phrase_t *ph;
+    static bool kws_ready;
+    if (!kws_ready) {
+        kws_init(VOCAB, VOCAB_N);
+        kws_ready = true;
+    }
+    if (!ph) ph = (kws_phrase_t *)psram_alloc(sizeof(kws_phrase_t));
+    ph->n_seqs = 0;
+    for (char *sp = strtok(spellings, "|"); sp; sp = strtok(NULL, "|")) kws_add_spelling(ph, sp, 64);
+    if (!ph->n_seqs) {
+        o.printf("{\"error\":\"no spellings\"}\n");
+        return 1;
+    }
+    int err = mic_open(14);
+    if (err || (!s_ring && !(s_ring = (int16_t *)psram_alloc(RING_SAMPLES * 2)))) {
+        o.printf("{\"error\":\"mic_open %d\"}\n", err);
+        return 1;
+    }
+    o.printf("{\"wake\":\"listening\",\"sequences\":%d,\"threshold\":%.1f}\n", ph->n_seqs, thr);
+    s_listener = xTaskGetCurrentTaskHandle();
+    s_ring_head = 0;
+    s_mic_run = true;
+    mic_start();
+    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0);
+
+    const uint32_t PRE = 300 * 16, HANG = 400 / 20, MAXLEN = 4 * 16000, OVERLAP = 1500 * 16;
+    float floor_db = 0.0f;
+    uint32_t pos = 0, seg_start = 0, quiet = 0, loud = 0, cmd_deadline = 0, blocks = 0;
+    float peak_db = -99.0f;  // loudest block since the last LVL report
+    bool in_speech = false, want_cmd = false;
+    static int16_t *seg;
+    if (!seg) seg = (int16_t *)psram_alloc(MAXLEN * 2 + 2 * PRE);
+    static char text[512];
+    while (!client_wants_stop(o.fd)) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+        uint32_t head = s_ring_head;
+        if (head - pos > RING_SAMPLES - MAXLEN) pos = head - BLOCK;  // fell behind: skip ahead
+        while (pos + BLOCK <= head) {
+            float db = block_db(pos);
+            pos += BLOCK;
+            // noise floor, minimum statistics: calibrate on the first 0.5 s, then fall fast
+            // toward quieter blocks and creep up ~1 dB/s, so it follows the room even
+            // through long stretches of noise
+            if (blocks < 25) {
+                floor_db = blocks ? floor_db + (db - floor_db) / (blocks + 1) : db;
+                blocks++;
+                continue;
+            }
+            floor_db = db < floor_db ? floor_db + 0.3f * (db - floor_db) : floor_db + 0.02f;
+            if (db > peak_db) peak_db = db;
+            if (++blocks % 50 == 0) {  // once a second: room level for the client's status line
+                o.printf("LVL %.0f %.0f %d\n", floor_db, peak_db, in_speech);
+                peak_db = -99.0f;
+            }
+            if (!in_speech) {
+                loud = db > floor_db + 10.0f ? loud + 1 : 0;
+                if (loud >= 2) {
+                    in_speech = true;
+                    quiet = 0;
+                    seg_start = pos > PRE + 2 * BLOCK ? pos - 2 * BLOCK - PRE : 0;
+                }
+                if (want_cmd && pos > cmd_deadline) {
+                    o.printf("CMD \n");
+                    want_cmd = false;
+                }
+                continue;
+            }
+            quiet = db < floor_db + 5.0f ? quiet + 1 : 0;
+            bool capped = pos - seg_start >= MAXLEN;
+            if (quiet < HANG && !capped) continue;
+            // speech stretch ended (or hit the cap): [seg_start, pos)
+            uint32_t n = pos - seg_start;
+            ring_copy(seg, seg_start, pos);
+            if (capped && quiet < HANG) {
+                seg_start = pos - OVERLAP;  // still talking: next window overlaps this one
+            } else {
+                in_speech = false;
+            }
+            int T_out = 0;
+            double ms = 0;
+            const int8_t *lg = run_pcm(seg, (int)n, &T_out, text, sizeof(text), &ms);
+            if (!lg) continue;
+            if (want_cmd) {  // this stretch is the command
+                o.printf("CMD %s\n", text);
+                want_cmd = false;
+                continue;
+            }
+            const int C = g_model.tensors[g_model.hdr->output].channels;
+            int ks = 0, ke = 0;
+            float sc = kws_score(ph, lg, T_out, C, g_model.tensors[g_model.hdr->output].exp, &ks, &ke);
+            o.printf("SEG %u %.1f %.0f %.0f %s\n", (unsigned)(n / 16), sc, ms, floor_db, text);
+            if (sc < thr) continue;
+            o.printf("WAKE %.1f\n", sc);
+            // command in the same breath? output frames are 80 ms (8 x 10 ms hops)
+            uint32_t after = (uint32_t)(ke + 1) * 8 * MEL_HOP;
+            if (after + 16000 * 6 / 10 < n) {
+                int T2 = 0;
+                if (run_pcm(seg + after, (int)(n - after), &T2, text, sizeof(text), NULL) && text[0]) {
+                    o.printf("CMD %s\n", text);
+                    continue;
+                }
+            }
+            want_cmd = true;
+            cmd_deadline = pos + 5 * 16000;
+        }
+    }
+    s_mic_run = false;
+    vTaskDelay(pdMS_TO_TICKS(100));
+    s_listener = NULL;
+    mic_stop();
+    // drain the line that stopped us
+    char c;
+    while (recv(o.fd, &c, 1, MSG_DONTWAIT) == 1 && c != '\n') {}
+    return 0;
+}
+
 static int handle(Out &o, char *line)
 {
+    static char orig[1024];  // untouched copy (strtok below splits `line` in place)
+    strncpy(orig, line, sizeof(orig) - 1);
     char *argv[6] = {};
     int argc = 0;
     for (char *t = strtok(line, " "); t && argc < 6; t = strtok(NULL, " ")) argv[argc++] = t;
@@ -442,6 +651,10 @@ static int handle(Out &o, char *line)
     if (load_model(o)) return 1;
 
     if (!strcmp(argv[0], "ktest")) return ktest(o);
+    if (!strcmp(argv[0], "wake")) {  // wake <thr> <spellings joined by '|', spaces allowed>
+        if (argc < 3) return 1;
+        return cmd_wake(o, atof(argv[1]), orig + (argv[2] - line));
+    }
     if (!strcmp(argv[0], "ref")) {  // ref 1: portable C ops everywhere (A/B)
         mmrt_use_ref = a1;
         o.printf("{\"use_ref\":%d}\n", a1);
@@ -504,7 +717,7 @@ static void tcp_task(void *)
         if (fd < 0) continue;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         Out o = {fd};
-        static char line[256];
+        static char line[1024];
         while (recv_line(fd, line, sizeof(line)) >= 0) {
             if (!line[0]) continue;
             char cmd[16] = {};

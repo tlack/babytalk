@@ -1,43 +1,42 @@
-// On-device Citrinet-256 speech-to-text test app (ESP-DL, weights read in place from
-// the `model` flash partition).
+// On-device speech-to-text test app: Citrinet-256 int8 on the mmrt runtime (../../mmrt),
+// weights read in place from the `model` flash partition (export/mmrt_export.py image).
 //
-// Audio goes in over WiFi: a TCP server on port 5555 (tools/stt.py). Each request is
-// one text line, then a raw binary payload; replies are JSON lines ending in "DONE rc":
-//   pcm <n_samples> [mode] [exact]  + n_samples*2 bytes s16le mono 16 kHz; exact=1 (default)
-//                            rebuilds the graph for the clip length, 0 uses the 1600 window
-//                            -> {"text":...} + timing
-//   win <T> [mode]           + the 1600x80 int16 input window (bit-exact check vs the
-//                            ESP-PPQ host sim) -> timing + "LOGITS <bytes>" + raw int16
-//   load [internal_kb] [param_copy]
+// WiFi TCP server on port 5555 (tools/stt.py, tools/listen.py). Each request is one text
+// line, then a raw binary payload; replies are JSON lines ending in "DONE <cmd> rc=<n>":
+//   pcm <n_samples>          + n_samples*2 bytes s16le mono 16 kHz -> text + timing
+//   feats <T> [logits]       + T*80 int8 model input (exponent from the model): the
+//                            bit-exact check against the host run of the same C runtime;
+//                            logits=1 also returns "LOGITS <bytes>" + int8 [T_out][272]
 //   listen <secs> [mode] [trim] [send_audio]
 //                            record from the board's mic now: streams "LEVEL <dBFS> <ms>"
 //                            lines while recording, then trims silence (trim=1) and
 //                            transcribes; send_audio=1 also returns "AUDIO <bytes>" + PCM
-// mode: 0 = auto, 1 = single core, 2 = multi core (ESP-DL runtime_mode_t).
+//   info                     model summary + memory
+// Every inference reply includes per-op-kind timings ("ops_ms").
 //
-// The USB console stays for status: `ip`, `load`, `prof`.
+// The USB console stays for status: `ip`.
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "dl_model_base.hpp"
 #include "esp_console.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
-#include "nvs_flash.h"
 #include "mic.h"
+#include "mmrt.h"
+#include "nvs_flash.h"
 #include "stt_core.h"
 #include "wifi_secrets.h"
-#include <math.h>
 
 extern "C" {
 #include "citrinet_tables.h"
@@ -45,10 +44,8 @@ extern "C" {
 
 #define PORT 5555
 
-extern "C" void dl_conv_sram_enable(bool on);  // patched ESP-DL (espdl/patches)
-
-static dl::Model *g_model;
-static int g_frames;  // input length the model is built for (frames)
+static mmrt_model_t g_model;
+static bool g_loaded;
 static SemaphoreHandle_t g_lock;  // model is shared by the TCP task and the console
 static char g_ip[16] = "0.0.0.0";
 
@@ -58,7 +55,7 @@ struct Out {
     int fd;
     void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)))
     {
-        char buf[512];
+        char buf[768];
         va_list ap;
         va_start(ap, fmt);
         int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -84,11 +81,8 @@ struct Out {
 };
 
 // ---------------------------------------------------------------- model
-static dl::TensorBase *io_tensor(bool input)
-{
-    auto &m = input ? g_model->get_inputs() : g_model->get_outputs();
-    return m.begin()->second;
-}
+static void *psram_alloc(size_t n) { return heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM); }
+static void psram_free(void *p) { heap_caps_free(p); }
 
 static void heap_line(Out &o, const char *when)
 {
@@ -98,84 +92,116 @@ static void heap_line(Out &o, const char *when)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
-// frames > 0: build the graph for that input length (ESP-DL input_shapes override);
-// 0: the static length stored in the model (1600).
-static int load_model(Out &o, int internal_kb, bool param_copy, int frames = 0)
+static int load_model(Out &o)
 {
-    delete g_model;
-    g_model = nullptr;
-    heap_line(o, "before_load");
+    if (g_loaded) return 0;
+    const esp_partition_t *p =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "model");
+    const void *img;
+    esp_partition_mmap_handle_t h;
     int64_t t0 = esp_timer_get_time();
-    std::map<std::string, std::vector<int>> shapes;
-    if (frames > 0) shapes["feats"] = {1, frames, MEL_N};
-    g_model = new dl::Model("model", fbs::MODEL_LOCATION_IN_FLASH_PARTITION, internal_kb * 1024,
-                            dl::MEMORY_MANAGER_GREEDY, nullptr, param_copy, shapes);
-    int64_t us = esp_timer_get_time() - t0;
-    if (!g_model || g_model->get_inputs().empty()) {
-        o.printf("{\"error\":\"model load failed\"}\n");
+    if (!p || esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &img, &h) != ESP_OK) {
+        o.printf("{\"error\":\"model partition mmap failed\"}\n");
         return 1;
     }
-    dl::TensorBase *in = io_tensor(true), *out = io_tensor(false);
-    g_frames = in->shape[1];
-    o.printf("{\"load_ms\":%.1f,\"internal_kb\":%d,\"param_copy\":%d,"
-             "\"in_shape\":[%d,%d,%d],\"in_dtype\":\"%s\",\"in_exp\":%d,"
-             "\"out_shape\":[%d,%d,%d],\"out_dtype\":\"%s\",\"out_exp\":%d}\n",
-             us / 1000.0, internal_kb, param_copy, in->shape[0], in->shape[1], in->shape[2],
-             dl::dtype_to_string(in->dtype), (int)in->exponent, out->shape[0], out->shape[1],
-             out->shape[2], dl::dtype_to_string(out->dtype), (int)out->exponent);
-    heap_line(o, "after_load");
+    int rc = mmrt_open(&g_model, img, p->size);
+    if (rc) {
+        o.printf("{\"error\":\"mmrt_open %d (flash the .mmrt image to the model partition)\"}\n", rc);
+        return 1;
+    }
+    g_loaded = true;
+    const mmrt_header_t *hd = g_model.hdr;
+    o.printf("{\"load_ms\":%.1f,\"ops\":%u,\"tensors\":%u,\"blob_mb\":%.2f,\"in_ch\":%u,\"in_exp\":%d,"
+             "\"out_ch\":%u,\"out_valid\":%u}\n",
+             (esp_timer_get_time() - t0) / 1000.0, (unsigned)hd->n_ops, (unsigned)hd->n_tensors,
+             hd->blob_size / 1e6, g_model.tensors[hd->input].channels, g_model.tensors[hd->input].exp,
+             g_model.tensors[hd->output].channels, (unsigned)hd->out_valid);
     return 0;
 }
 
-static int ensure_model(Out &o) { return g_model ? 0 : load_model(o, 0, false); }
-
-static dl::runtime_mode_t mode_of(int m)
+// Per-op-kind wall time, via the runtime's trace hook (called after every op).
+static int64_t g_kind_us[8], g_last_us;
+static void on_op(int, const mmrt_op_t *op, const int8_t *, int, int)
 {
-    return m == 2 ? dl::RUNTIME_MODE_MULTI_CORE : (m == 0 ? dl::RUNTIME_MODE_AUTO : dl::RUNTIME_MODE_SINGLE_CORE);
+    int64_t now = esp_timer_get_time();
+    g_kind_us[op->kind & 7] += now - g_last_us;
+    g_last_us = now;
 }
 
-// Model on the already-filled input; decode the first out_frames; report.
-static int run_and_decode(Out &o, int T, int mode, double fe_ms, int n_samples, bool send_logits)
+// Run the model on int8 input [T][80]; decode; report text, FNV of the logits, timing.
+static int infer(Out &o, const int8_t *x, int T, double fe_ms, int n_samples, bool send_logits)
 {
-    dl::TensorBase *out = io_tensor(false);
+    memset(g_kind_us, 0, sizeof(g_kind_us));
+    mmrt_trace = on_op;
+    int T_out = 0;
     int64_t t0 = esp_timer_get_time();
-    g_model->run(mode_of(mode));
+    g_last_us = t0;
+    const int8_t *y = mmrt_run(&g_model, x, T, &T_out, psram_alloc, psram_free);
     int64_t run_us = esp_timer_get_time() - t0;
-
-    int frames = stt_out_frames(T);
-    static char text[1024];
-    t0 = esp_timer_get_time();
-    const int16_t *logits = (const int16_t *)out->data;
-    int16_t *wide = NULL;
-    if (out->dtype == dl::DATA_TYPE_INT8) {  // int8 model: widen for the decoder
-        size_t n = (size_t)frames * (VOCAB_N + 1);
-        wide = (int16_t *)heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM);
-        for (size_t i = 0; i < n; i++) wide[i] = ((const int8_t *)out->data)[i];
-        logits = wide;
+    mmrt_trace = NULL;
+    if (!y) {
+        o.printf("{\"error\":\"mmrt_run failed (out of memory?)\"}\n");
+        return 1;
     }
-    stt_ctc_greedy(logits, frames, VOCAB_N, VOCAB, text, sizeof(text));
-    heap_caps_free(wide);
-    int64_t dec_us = esp_timer_get_time() - t0;
+    const int C = g_model.tensors[g_model.hdr->output].channels, V = (int)g_model.hdr->out_valid;
 
-    // FNV-1a over the decoded logits: bit-exactness check across kernel variants.
+    // FNV-1a over the valid logits [T_out][V]: the bit-exactness check.
     uint32_t fnv = 2166136261u;
-    const uint8_t *lp = (const uint8_t *)out->data;
-    for (size_t i = 0; i < (size_t)frames * (VOCAB_N + 1) * (out->dtype == dl::DATA_TYPE_INT8 ? 1 : 2); i++)
-        fnv = (fnv ^ lp[i]) * 16777619u;
-    // text is lowercase letters, spaces and apostrophes: safe inside a JSON string.
+    for (int t = 0; t < T_out; t++)
+        for (int v = 0; v < V; v++) fnv = (fnv ^ (uint8_t)y[t * C + v]) * 16777619u;
+
+    t0 = esp_timer_get_time();
+    int16_t *wide = (int16_t *)psram_alloc((size_t)T_out * V * 2);
+    for (int t = 0; t < T_out; t++)
+        for (int v = 0; v < V; v++) wide[t * V + v] = y[t * C + v];
+    static char text[1024];
+    stt_ctc_greedy(wide, T_out, VOCAB_N, VOCAB, text, sizeof(text));
+    psram_free(wide);
+    double dec_ms = (esp_timer_get_time() - t0) / 1000.0;
+
     o.printf("{\"text\":\"%s\",\"logits_fnv\":\"%08lx\"}\n", text, (unsigned long)fnv);
-    double audio_ms = n_samples / 16.0;
-    double total_ms = fe_ms + run_us / 1000.0 + dec_us / 1000.0;
-    o.printf("{\"T\":%d,\"out_frames\":%d,\"mode\":%d,\"audio_ms\":%.0f,\"fe_ms\":%.1f,\"model_ms\":%.1f,"
-             "\"decode_ms\":%.2f,\"total_ms\":%.1f,\"rtf\":%.3f}\n",
-             T, frames, mode, audio_ms, fe_ms, run_us / 1000.0, dec_us / 1000.0, total_ms,
-             audio_ms > 0 ? total_ms / audio_ms : 0.0);
+    static const char *const K[8] = {"?", "dwconv", "conv1x1", "mean", "lut", "mul", "add", "?"};
+    char ops[256];
+    int k = 0;
+    for (int i = 1; i <= 6; i++)
+        k += snprintf(ops + k, sizeof(ops) - k, "%s\"%s\":%.1f", i > 1 ? "," : "", K[i], g_kind_us[i] / 1000.0);
+    double audio_ms = n_samples / 16.0, total_ms = fe_ms + run_us / 1000.0 + dec_ms;
+    o.printf("{\"T\":%d,\"out_frames\":%d,\"audio_ms\":%.0f,\"fe_ms\":%.1f,\"model_ms\":%.1f,\"decode_ms\":%.2f,"
+             "\"total_ms\":%.1f,\"rtf\":%.3f,\"ops_ms\":{%s}}\n",
+             T, T_out, audio_ms, fe_ms, run_us / 1000.0, dec_ms, total_ms, audio_ms > 0 ? total_ms / audio_ms : 0.0,
+             ops);
     if (send_logits) {
-        size_t n = (size_t)out->shape[1] * out->shape[2] * 2;
-        o.printf("LOGITS %u\n", (unsigned)n);
-        o.write(out->data, n);
+        o.printf("LOGITS %d\n", T_out * C);
+        o.write(y, (size_t)T_out * C);
     }
     return 0;
+}
+
+// PCM -> features -> int8 model input -> infer.
+static int transcribe(Out &o, const int16_t *pcm, int n)
+{
+    int T = stt_num_frames(n);
+    if (n < MEL_HOP || T > STT_WIN_FRAMES) {
+        o.printf("{\"error\":\"length: max %d samples\"}\n", (STT_WIN_FRAMES - 1) * MEL_HOP);
+        return 1;
+    }
+    float *feats = (float *)psram_alloc(sizeof(float) * T * MEL_N);
+    float *scratch = (float *)heap_caps_malloc(sizeof(float) * stt_scratch_floats(), MALLOC_CAP_INTERNAL);
+    int16_t *q16 = (int16_t *)psram_alloc((size_t)T * MEL_N * 2);
+    int8_t *q8 = (int8_t *)psram_alloc((size_t)T * MEL_N);
+    int rc = 1;
+    if (feats && scratch && q16 && q8) {
+        int64_t t0 = esp_timer_get_time();
+        stt_features(pcm, n, feats, scratch);
+        stt_fill_quant(feats, T, q16, T, g_model.tensors[g_model.hdr->input].exp);
+        for (int i = 0; i < T * MEL_N; i++) q8[i] = q16[i] > 127 ? 127 : (q16[i] < -128 ? -128 : q16[i]);
+        rc = infer(o, q8, T, (esp_timer_get_time() - t0) / 1000.0, n, false);
+    }
+    psram_free(feats);
+    heap_caps_free(scratch);
+    psram_free(q16);
+    psram_free(q8);
+    return rc;
 }
 
 // ---------------------------------------------------------------- TCP server
@@ -210,7 +236,7 @@ static bool speech_bounds(const int16_t *pcm, int n, int *b, int *e)
 {
     const int F = 320, nf = n / F;
     if (nf < 3) return false;
-    float *db = (float *)heap_caps_malloc(sizeof(float) * nf * 2, MALLOC_CAP_SPIRAM), *srt = db + nf;
+    float *db = (float *)psram_alloc(sizeof(float) * nf * 2), *srt = db + nf;
     for (int f = 0; f < nf; f++) {
         double sq = 0;
         for (int i = 0; i < F; i++) sq += (double)pcm[f * F + i] * pcm[f * F + i];
@@ -222,7 +248,7 @@ static bool speech_bounds(const int16_t *pcm, int n, int *b, int *e)
     int first = -1, last = -1;
     for (int f = 0; f < nf; f++)
         if (db[f] > thr) { if (first < 0) first = f; last = f; }
-    heap_caps_free(db);
+    psram_free(db);
     if (first < 0) return false;
     const int pad = 16000 / 4;
     *b = first * F - pad < 0 ? 0 : first * F - pad;
@@ -230,26 +256,7 @@ static bool speech_bounds(const int16_t *pcm, int n, int *b, int *e)
     return true;
 }
 
-// Features -> model -> CTC on pcm[0:n], rebuilding the graph if its length changed.
-static int transcribe(Out &o, const int16_t *pcm, int n, int mode)
-{
-    int T = stt_num_frames(n);
-    float *feats = (float *)heap_caps_malloc(sizeof(float) * T * MEL_N, MALLOC_CAP_SPIRAM);
-    float *scratch = (float *)heap_caps_malloc(sizeof(float) * stt_scratch_floats(), MALLOC_CAP_INTERNAL);
-    int rc = 1;
-    if (feats && scratch && (g_frames == T || load_model(o, 0, false, T) == 0)) {
-        dl::TensorBase *in = io_tensor(true);
-        int64_t t0 = esp_timer_get_time();
-        stt_features(pcm, n, feats, scratch);
-        stt_fill_quant(feats, T, (int16_t *)in->data, T, (int)in->exponent);
-        rc = run_and_decode(o, T, mode, (esp_timer_get_time() - t0) / 1000.0, n, false);
-    }
-    heap_caps_free(feats);
-    heap_caps_free(scratch);
-    return rc;
-}
-
-static int cmd_listen(Out &o, int secs, int mode, bool trim, bool send_audio)
+static int cmd_listen(Out &o, int secs, bool trim, bool send_audio)
 {
     if (secs < 1 || secs > 15) {
         o.printf("{\"error\":\"secs must be 1..15\"}\n");
@@ -261,12 +268,9 @@ static int cmd_listen(Out &o, int secs, int mode, bool trim, bool send_audio)
         return 1;
     }
     const int n = secs * 16000;
-    // Build the graph for the full recording now, so an untrimmed clip starts
-    // inference the moment recording ends.
-    if (g_frames != stt_num_frames(n) && load_model(o, 0, false, stt_num_frames(n))) return 1;
-    int16_t *pcm = (int16_t *)heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM);
+    int16_t *pcm = (int16_t *)psram_alloc(n * 2);
     if (!pcm || mic_start()) {
-        heap_caps_free(pcm);
+        psram_free(pcm);
         return 1;
     }
     o.printf("REC start %d\n", secs);
@@ -284,19 +288,16 @@ static int cmd_listen(Out &o, int secs, int mode, bool trim, bool send_audio)
         o.printf("AUDIO %d\n", n * 2);
         o.write(pcm, n * 2);
     }
-
     int b = 0, e = n, rc = 0;
     bool speech = !trim || speech_bounds(pcm, n, &b, &e);
-    // A shorter graph costs a ~0.5 s rebuild; only worth it if it drops > 0.3 s of audio.
-    if (speech && trim && n - (e - b) < 16000 * 3 / 10) b = 0, e = n;
-    o.printf("{\"speech_ms\":%d,\"recorded_ms\":%d,\"trimmed\":%d}\n", (e - b) / 16, n / 16, speech ? n - (e - b) > 0 : 1);
+    o.printf("{\"speech_ms\":%d,\"recorded_ms\":%d}\n", (e - b) / 16, n / 16);
     if (!speech) {
         o.printf("{\"text\":\"\"}\n");
     } else {
-        rc = transcribe(o, pcm + b, e - b, mode);
+        rc = transcribe(o, pcm + b, e - b);
     }
     o.printf("{\"wait_ms\":%.0f}\n", (esp_timer_get_time() - t_end) / 1000.0);
-    heap_caps_free(pcm);
+    psram_free(pcm);
     return rc;
 }
 
@@ -307,66 +308,34 @@ static int handle(Out &o, char *line)
     for (char *t = strtok(line, " "); t && argc < 6; t = strtok(NULL, " ")) argv[argc++] = t;
     if (!argc) return 1;
     int a1 = argc > 1 ? atoi(argv[1]) : 0;
-    int a2 = argc > 2 ? atoi(argv[2]) : 1;
+    if (load_model(o)) return 1;
 
-    if (!strcmp(argv[0], "load")) return load_model(o, a1, argc > 2 && a2);
-    if (!strcmp(argv[0], "sram")) {  // sram 0|1: stage 1x1 conv filters in SRAM (patched ESP-DL)
-        dl_conv_sram_enable(a1);
-        o.printf("{\"sram\":%d}\n", a1);
+    if (!strcmp(argv[0], "info")) {
+        heap_line(o, "now");
         return 0;
     }
-    if (!strcmp(argv[0], "listen"))
-        return cmd_listen(o, a1, a2, argc > 3 ? atoi(argv[3]) : 1, argc > 4 && atoi(argv[4]));
-    if (ensure_model(o)) return 1;
-    int a3 = argc > 3 ? atoi(argv[3]) : 1;  // pcm: 1 = exact-length graph, 0 = static 1600 window
-
+    if (!strcmp(argv[0], "listen"))  // argv[2] (mode) is accepted for compatibility
+        return cmd_listen(o, a1, argc > 3 ? atoi(argv[3]) : 1, argc > 4 && atoi(argv[4]));
     if (!strcmp(argv[0], "pcm")) {
-        int n = a1, T = stt_num_frames(n);
-        if (n < MEL_HOP || T > STT_WIN_FRAMES) {
-            o.printf("{\"error\":\"length: max %d samples\"}\n", (STT_WIN_FRAMES - 1) * MEL_HOP);
-            return 1;
-        }
-        int16_t *pcm = (int16_t *)heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM);
-        float *feats = (float *)heap_caps_malloc(sizeof(float) * T * MEL_N, MALLOC_CAP_SPIRAM);
-        float *scratch = (float *)heap_caps_malloc(sizeof(float) * stt_scratch_floats(), MALLOC_CAP_INTERNAL);
+        int n = a1;
+        int16_t *pcm = (int16_t *)psram_alloc((size_t)n * 2);
         int rc = 1;
         int64_t t_rx = esp_timer_get_time();
-        if (pcm && feats && scratch && recv_all(o.fd, pcm, n * 2) == 0) {
-            double rx_ms = (esp_timer_get_time() - t_rx) / 1000.0;
-            o.printf("{\"rx_ms\":%.1f,\"rx_bytes\":%d}\n", rx_ms, n * 2);
-            int want = a3 ? T : STT_WIN_FRAMES;
-            if (g_frames != want && load_model(o, 0, false, want)) {
-                rc = 1;
-                goto done;
-            }
-            dl::TensorBase *in = io_tensor(true);
-            int64_t t0 = esp_timer_get_time();
-            stt_features(pcm, n, feats, scratch);
-            if (in->dtype == dl::DATA_TYPE_INT8) {  // int8 model: saturate to int8
-                int16_t *tmp = (int16_t *)heap_caps_malloc((size_t)want * MEL_N * 2, MALLOC_CAP_SPIRAM);
-                stt_fill_quant(feats, T, tmp, want, (int)in->exponent);
-                for (size_t i = 0; i < (size_t)want * MEL_N; i++)
-                    ((int8_t *)in->data)[i] = tmp[i] > 127 ? 127 : (tmp[i] < -128 ? -128 : tmp[i]);
-                heap_caps_free(tmp);
-            } else {
-                stt_fill_quant(feats, T, (int16_t *)in->data, want, (int)in->exponent);
-            }
-            double fe_ms = (esp_timer_get_time() - t0) / 1000.0;
-            rc = run_and_decode(o, T, a2, fe_ms, n, false);
+        if (pcm && recv_all(o.fd, pcm, (size_t)n * 2) == 0) {
+            o.printf("{\"rx_ms\":%.1f,\"rx_bytes\":%d}\n", (esp_timer_get_time() - t_rx) / 1000.0, n * 2);
+            rc = transcribe(o, pcm, n);
         }
-    done:
-        heap_caps_free(pcm);
-        heap_caps_free(feats);
-        heap_caps_free(scratch);
+        psram_free(pcm);
         return rc;
     }
-    if (!strcmp(argv[0], "win")) {
+    if (!strcmp(argv[0], "feats")) {
         int T = a1;
-        if (T <= 0 || T > STT_WIN_FRAMES) return 1;
-        if (g_frames != STT_WIN_FRAMES && load_model(o, 0, false, STT_WIN_FRAMES)) return 1;
-        dl::TensorBase *in = io_tensor(true);
-        if (recv_all(o.fd, in->data, (size_t)STT_WIN_FRAMES * MEL_N * 2)) return 1;
-        return run_and_decode(o, T, a2, 0.0, 0, true);
+        if (T < 1 || T > 4 * STT_WIN_FRAMES) return 1;
+        int8_t *x = (int8_t *)psram_alloc((size_t)T * MEL_N);
+        int rc = 1;
+        if (x && recv_all(o.fd, x, (size_t)T * MEL_N) == 0) rc = infer(o, x, T, 0.0, T * MEL_HOP, argc > 2 && atoi(argv[2]));
+        psram_free(x);
+        return rc;
     }
     o.printf("{\"error\":\"unknown command\"}\n");
     return 1;
@@ -451,51 +420,26 @@ static int cmd_ip(int, char **)
     return 0;
 }
 
-static int cmd_load(int argc, char **argv)
-{
-    Out o = {-1};
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    int rc = load_model(o, argc > 1 ? atoi(argv[1]) : 0, argc > 2 && atoi(argv[2]));
-    xSemaphoreGive(g_lock);
-    printf("@@DONE load rc=%d\n", rc);
-    return rc;
-}
-
-static int cmd_prof(int argc, char **argv)
-{
-    Out o = {-1};
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    int rc = ensure_model(o);
-    if (rc == 0) {
-        esp_log_level_set("*", ESP_LOG_INFO);  // ESP-DL prints its tables with ESP_LOGI
-        g_model->profile(argc > 1 && atoi(argv[1]));
-        esp_log_level_set("*", ESP_LOG_WARN);
-    }
-    xSemaphoreGive(g_lock);
-    printf("@@DONE prof rc=%d\n", rc);
-    return rc;
-}
-
 extern "C" void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_WARN);
     g_lock = xSemaphoreCreateMutex();
     wifi_start();
-    // Inference runs in this task: big stack, pinned to core 1 (WiFi lives on core 0).
+    // Inference runs in this task, pinned to core 1 (WiFi lives on core 0).
     xTaskCreatePinnedToCore(tcp_task, "stt_tcp", 16 * 1024, NULL, 5, NULL, 1);
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_cfg.prompt = "stt>";
-    repl_cfg.task_stack_size = 16 * 1024;
+    repl_cfg.task_stack_size = 8 * 1024;
     esp_console_dev_usb_serial_jtag_config_t hw_cfg = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_cfg, &repl_cfg, &repl));
     esp_console_register_help_command();
-    esp_console_cmd_t cmds[3] = {};
-    cmds[0].command = "ip"; cmds[0].help = "print the TCP address"; cmds[0].func = cmd_ip;
-    cmds[1].command = "load"; cmds[1].help = "load model [internal_kb] [param_copy]"; cmds[1].func = cmd_load;
-    cmds[2].command = "prof"; cmds[2].help = "ESP-DL profile of the model [sort]"; cmds[2].func = cmd_prof;
-    for (const auto &c : cmds) ESP_ERROR_CHECK(esp_console_cmd_register(&c));
-    printf("@@BOOT micromodels_stt\n");
+    esp_console_cmd_t cmd = {};
+    cmd.command = "ip";
+    cmd.help = "print the TCP address";
+    cmd.func = cmd_ip;
+    ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    printf("@@BOOT micromodels_stt (mmrt)\n");
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
 }

@@ -1,70 +1,10 @@
 dependencies:
-  espressif/dl_fft:
-    component_hash: 3e8f7d34e04bfa6333f289a6d126745bebe0cee9311b81a6a5d106047f63ef65
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=5.0'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 0.7.0
-  espressif/esp-dl:
-    dependencies:
-    - name: espressif/dl_fft
-      version: '>=0.6.0'
-    - name: espressif/esp_new_jpeg
-      version: ^1
-    - matches:
-      - if: target in ["esp32", "esp32c2", "esp32c3", "esp32c6", "esp32p4", "esp32s2", "esp32s3"]
-        version: '>=5.3'
-      - if: target == esp32c5
-        version: '>=5.5'
-      - if: target == esp32s31
-        version: '>=6.0'
-      name: idf
-    source:
-      path: /home/tlack/work/esp32-micromodels/stt/components/esp-dl
-      type: local
-    targets:
-    - esp32
-    - esp32c2
-    - esp32c3
-    - esp32c5
-    - esp32c6
-    - esp32p4
-    - esp32s2
-    - esp32s3
-    - esp32s31
-    version: 3.3.11
-  espressif/esp_new_jpeg:
-    component_hash: e1e7e6991193c41ed6c9fc386702aa7821433319e7aa9c3147cd3236310cd69c
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    targets:
-    - esp32
-    - esp32s2
-    - esp32s3
-    - esp32s31
-    - esp32p4
-    - esp32c2
-    - esp32c3
-    - esp32c5
-    - esp32c6
-    - esp32c61
-    - esp32h4
-    version: 1.0.2
   idf:
     source:
       type: idf
     version: 5.5.1
 direct_dependencies:
-- espressif/dl_fft
-- espressif/esp-dl
-- espressif/esp_new_jpeg
 - idf
-manifest_hash: 48c9265daa49b1f58dac572235358e88eea17a6d7443e737ec762b90d2ca09dd
+manifest_hash: 9e2e0d433376f32734745c8c8a6e24bcb9001b57722895c64301a5fd6946e22a
 target: esp32s3
 version: 2.0.0

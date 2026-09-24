@@ -1,6 +1,2 @@
 dependencies:
   idf: ">=5.3"
-  # Patched copy (espdl/setup.sh): pristine 3.3.11 + espdl/patches/*.patch
-  espressif/esp-dl:
-    version: "3.3.11"
-    override_path: "../components/esp-dl"

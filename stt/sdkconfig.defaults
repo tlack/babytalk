@@ -7,7 +7,6 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
-# ESP-DL allocates its activations with plain malloc when they exceed internal RAM.
 CONFIG_SPIRAM_USE_MALLOC=y
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -30,9 +29,6 @@ CONFIG_ESP_TASK_WDT_EN=n
 
 CONFIG_FATFS_LFN_HEAP=y
 
-# ESP-DL is C++ and wants exceptions off / larger main stack
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
-
 # WiFi transport (TCP server for PCM in / results out). Keep WiFi/lwIP buffers out
 # of internal RAM: the model already leaves only ~147KB there.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
@@ -40,7 +36,5 @@ CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 
-# ESP-DL's model metadata is thousands of small mallocs; by default everything <= 16KB
-# goes to internal RAM first (loading the model took ~123KB of it). Keep internal RAM for
-# stacks, WiFi and the 64KB 1x1-conv filter staging buffer (espdl/patches).
+# Keep internal RAM for stacks, WiFi and kernel scratch: mallocs > 1KB go to PSRAM.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024

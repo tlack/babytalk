@@ -106,6 +106,8 @@ def _init(mode, fold, pad_mode, onnx_path, se_only=False, fill="zero", long="chu
 
 def _run_static(x: torch.Tensor) -> torch.Tensor:
     """x [1,80,WIN] -> logits [257, WIN/8]."""
+    if "runner" in _G:  # injected (e.g. the ESP-PPQ quantized-graph executor)
+        return _G["runner"](x)
     if _G["mode"] == "onnx":
         s = _G["sess"]
         return torch.from_numpy(s.run(None, {s.get_inputs()[0].name: x.numpy()})[0])[0]

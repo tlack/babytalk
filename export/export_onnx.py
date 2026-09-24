@@ -38,13 +38,33 @@ class StaticSE(nn.Module):
         return x * torch.sigmoid(self.fc2(F.relu(self.fc1(y))))
 
 
+DEAD_SE_TOL = 0.01
+
+
+def se_is_dead(se) -> bool:
+    """A trained-out SE: fc1/fc2 weights ~0, so fc2(relu(fc1(.))) ~ 0 and the gate is a
+    constant sigmoid(0) = 0.5. Blocks 0, 10, 13, 14, 15 of this checkpoint (weights <= 8e-3,
+    fc1 output measured exactly 0 on dev-clean). Their near-zero weights also break ESP-DL
+    int8 (output_exp < in_exp + w_exp), so we fold the 0.5 into the preceding conv."""
+    return se.fc1.weight.abs().max() < DEAD_SE_TOL and se.fc2.weight.abs().max() < DEAD_SE_TOL
+
+
 class StaticBlock(nn.Module):
-    def __init__(self, blk):
+    def __init__(self, blk, prune_dead_se=True):
         super().__init__()
         self.convs = nn.ModuleList()
         for c in blk.convs:  # folded: dw (no bias) -> pw (bias)
             self.convs.append(nn.Sequential(c.dw, c.pw))
-        self.se = StaticSE(blk.se)
+        if prune_dead_se and se_is_dead(blk.se):
+            import copy
+
+            last = copy.deepcopy(blk.convs[-1].pw)
+            last.weight.data *= 0.5
+            last.bias.data *= 0.5
+            self.convs[-1] = nn.Sequential(blk.convs[-1].dw, last)
+            self.se = nn.Identity()
+        else:
+            self.se = StaticSE(blk.se)
         self.res = blk.res.conv if blk.res is not None else None
 
     def forward(self, x):
@@ -60,18 +80,19 @@ class StaticBlock(nn.Module):
 
 
 class StaticCitrinet(nn.Module):
-    def __init__(self, folded):
+    def __init__(self, folded, prune_dead_se=True):
         super().__init__()
-        self.blocks = nn.Sequential(*[StaticBlock(b) for b in folded.blocks])
+        self.blocks = nn.Sequential(*[StaticBlock(b, prune_dead_se) for b in folded.blocks])
         self.decoder = folded.decoder
 
     def forward(self, feats):
         return self.decoder(self.blocks(feats))
 
 
-def build(win=1600):
+def build(win=1600, prune_dead_se=True):
     m, feat, vocab, cfg = load_model()
-    sm = StaticCitrinet(fold_bn(m)).eval()
+    sm = StaticCitrinet(fold_bn(m), prune_dead_se).eval()
+    print("dead SE pruned in blocks:", [i for i, b in enumerate(sm.blocks) if isinstance(b.se, nn.Identity)])
     # equivalence with the reference (unfolded, unmasked) model on random input
     x = torch.randn(1, 80, win)
     with torch.no_grad():

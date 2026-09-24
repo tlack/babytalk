@@ -49,9 +49,44 @@ Findings that shaped the design:
 
 | | stock ESP-DL | patched ESP-DL (2 cores) | mmrt (2 cores) |
 |---|---|---|---|
-| 10.4 s clip | RTF 1.33 | 0.37 | **0.13** |
-| 2 s command, model only | 2.5 s | ~1.0 s | **0.53 s** |
+| 10.4 s clip | RTF 1.33 | 0.37 | **0.10** |
+| 2 s command, model only | 2.5 s | ~1.0 s | **0.36 s** |
 | app size | 1.8 MB | 1.8 MB | 0.9 MB |
 
-Next: the float log-mel front end (now ~40% of total time; can run while recording),
-weight-staging overlap / faster flash, int8 accuracy via QAT.
+## Speed log (model time, 2 cores, bit-exact at every step)
+
+| step | 1 s | 2 s | 4 s | 10 s |
+|---|---|---|---|---|
+| first mmrt (staged 1x1, 2-core split) | 442 | 534 | | 1349 |
+| + weight streaming for short inputs (core 0 copies, core 1 computes) | 374 | 496 | | |
+| + fused depthwise -> 1x1 via per-core SRAM tiles | | | 675 | 1187 |
+| + 6MB of weights cached in PSRAM at load (dw weights first) | 281 | 413 | 547 | 1041 |
+| + activations <= 32KB in internal SRAM (40KB kept free) | **245** | **357** | **516** | **1015** |
+
+Where the time goes now (`export/mmrt_profile.py`): the model is **memory-bound** at every
+length. The 1x1 kernel itself runs at 1.19 cycles per VSMULAS (`c1bench`: ~3.2 GMAC/s
+per core with operands in SRAM or cached PSRAM), but per inference 9.2MB of 1x1 weights
+cross the shared flash/PSRAM bus, plus the activations. At 1 s the weight streamer (186
+ms) is the critical path while core 1 computes ~140 ms; at 10 s staging is ~25% of the
+1x1 wall. Copying on two cores instead of one does not help (bus-bound, flash or PSRAM).
+Remaining levers: GDMA prefetch of the next op's weights from the PSRAM cache during
+compute (GDMA can't read mapped flash), folding the SE mean into the producing kernel,
+fewer weight bytes (int4 / pruning).
+
+Why SRAM activations help short inputs: the streamer's flash reads go through the same
+64KB dcache and evict core 1's PSRAM activations, which then miss behind the streamer
+(depthwise at 1 s: 93 -> 37 ms). `internal_min_free` understates the low point here: it
+sums each heap region's own minimum, reached at different times.
+
+### A dual-core race that was a kernel, not a race
+
+A frame-loop depthwise kernel (`mmrt_s3_dw_rows`, all interior frames in one call, taps
+software-pipelined two at a time) gave, on two cores only, one wrong 32-bit word in one
+output row about once per 1000 calls: the same input produced different logits in ~1 of
+10 ten-second runs. Tools that found it: `prof <T> 1 99999` (per-frame hashes of every
+op, diffed across runs: always a single frame of a depthwise op) and `dwstress` (2-core
+vs 1-core depthwise, thousands of iterations). Not the stack, not the QACC init, not
+the rounding: the same loop was clean in 10k calls with a `nop` before the loop end or
+unpipelined, and the proven per-frame `dw_row` path is just as fast end to end (bus-bound),
+so the kernel was removed. Lesson: every kernel change gets a two-core `dwstress`-style
+soak, not just `ktest`.

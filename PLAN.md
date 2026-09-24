@@ -214,6 +214,11 @@ block tail, mean) proven bit-exact on the board, two-core split. Same outputs as
 **RTF 0.13 on long clips, 0.53 s model time for a 2 s command**, app 0.9 MB. Short clips
 are now bound by streaming 9.8MB of weights out of flash (~0.3 s). Details: `mmrt/README.md`.
 
+Speed pass (2026-09-24, later): PSRAM weight cache (6MB at load), small activations in
+SRAM, depthwise->1x1 fusion; a rare dual-core wrong-word bug traced to a pipelined
+depthwise kernel and removed. Model time 1 s **245 ms**, 2 s 357, 4 s 516, 10 s 1015
+(RTF 0.10), bit-exact throughout. Now memory-bound everywhere (see `mmrt/README.md`).
+
 ## 4. Phases
 
 ### Phase 0 — Measure the hardware (gates everything)

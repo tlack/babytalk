@@ -133,12 +133,19 @@ static int load_model(Out &o)
     return 0;
 }
 
-// Per-op-kind wall time, via the runtime's trace hook (called after every op).
+// Per-op-kind wall time, via the runtime's trace hook (called after every op), and
+// optionally per op (profiling: `prof`).
 static int64_t g_kind_us[8], g_last_us;
-static void on_op(int, const mmrt_op_t *op, const int8_t *, int, int)
+static int32_t *g_op_us;  // [n_ops] when profiling
+static int16_t *g_op_T;
+static void on_op(int i, const mmrt_op_t *op, const int8_t *, int T, int)
 {
     int64_t now = esp_timer_get_time();
     g_kind_us[op->kind & 7] += now - g_last_us;
+    if (g_op_us) {
+        g_op_us[i] = (int32_t)(now - g_last_us);
+        g_op_T[i] = (int16_t)T;
+    }
     g_last_us = now;
 }
 
@@ -686,6 +693,30 @@ static int handle(Out &o, char *line)
             rc = transcribe(o, pcm, n);
         }
         psram_free(pcm);
+        return rc;
+    }
+    if (!strcmp(argv[0], "prof")) {  // prof <T> + T*80 int8: per-op timing ("OPS" line) + 1x1 split
+        int T = a1, n = (int)g_model.hdr->n_ops;
+        int8_t *x = (int8_t *)psram_alloc((size_t)T * MEL_N);
+        g_op_us = (int32_t *)calloc(n, 4);
+        g_op_T = (int16_t *)calloc(n, 2);
+        int rc = 1;
+        extern int64_t mmrt_s3_stage_us[2], mmrt_s3_c1_us[2];
+        memset(mmrt_s3_stage_us, 0, sizeof(mmrt_s3_stage_us));
+        memset(mmrt_s3_c1_us, 0, sizeof(mmrt_s3_c1_us));
+        if (x && g_op_us && recv_all(o.fd, x, (size_t)T * MEL_N) == 0) {
+            rc = infer(o, x, T, 0.0, T * MEL_HOP, false);
+            o.printf("{\"stage_us\":[%lld,%lld],\"c1_us\":[%lld,%lld]}\n", (long long)mmrt_s3_stage_us[0],
+                     (long long)mmrt_s3_stage_us[1], (long long)mmrt_s3_c1_us[0], (long long)mmrt_s3_c1_us[1]);
+            o.printf("OPS");
+            for (int i = 0; i < n; i++) o.printf(" %d:%d", (int)g_op_us[i], (int)g_op_T[i]);
+            o.printf("\n");
+        }
+        free(g_op_us);
+        free(g_op_T);
+        g_op_us = NULL;
+        g_op_T = NULL;
+        psram_free(x);
         return rc;
     }
     if (!strcmp(argv[0], "feats")) {

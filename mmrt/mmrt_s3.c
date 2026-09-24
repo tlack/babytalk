@@ -63,6 +63,9 @@ static void *s_arg;
 static SemaphoreHandle_t s_go, s_done;
 
 int64_t mmrt_s3_part_us[2];  // wall time of each core's part in the last split call
+// Profiling counters (cumulative, reset by the caller): 1x1 weight staging and compute
+// per core (index 0 = worker / single-core, 1 = caller's half).
+int64_t mmrt_s3_stage_us[2], mmrt_s3_c1_us[2];
 
 static void timed(part_fn fn, void *arg, int part)
 {
@@ -138,16 +141,21 @@ static void c1_part(void *arg, int part)
     if (e <= b) return;
     const size_t group_bytes = (size_t)j->C * 16;
     const int8_t *w = j->w + (size_t)b * group_bytes;
+    const int core = part == 1 ? 1 : 0;
+    int64_t t0 = esp_timer_get_time();
     if (mmrt_s3_stage && !esp_ptr_internal(w)) {
         int8_t *buf = part == 1 ? s_wstage1 : s_wstage0;
         memcpy(buf, w, (size_t)(e - b) * group_bytes);
         w = buf;
     }
+    int64_t t1 = esp_timer_get_time();
     mmrt_s3_c1_t a = j->a;
     a.groups = e - b;
     if (a.bias_q) a.bias_q += (size_t)b * 64;
     for (int t = 0; t < j->T; t++)
         mmrt_s3_conv1x1_row(j->y + (size_t)t * j->N + b * 16, j->x + (size_t)t * j->stride * j->C, w, &a);
+    mmrt_s3_stage_us[core] += t1 - t0;
+    mmrt_s3_c1_us[core] += esp_timer_get_time() - t1;
 }
 
 void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,

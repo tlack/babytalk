@@ -78,7 +78,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("STT_HOST"))
     ap.add_argument("--serial", default="/dev/ttyACM0")
-    ap.add_argument("--mode", type=int, default=1, help="ESP-DL runtime: 0 auto, 1 single core, 2 multi core")
+    ap.add_argument("--mode", type=int, default=2, help="ESP-DL runtime: 0 auto, 1 single core, 2 multi core")
+    ap.add_argument("--sram", type=int, choices=[0, 1], help="stage 1x1 conv filters in SRAM (patched ESP-DL); omit = leave as is")
     ap.add_argument("--static", action="store_true", help="use the fixed 1600-frame window instead of an exact-length graph")
     ap.add_argument("--note", default="")
     ap.add_argument("cmd", choices=["load", "pcm"])
@@ -94,6 +95,8 @@ def main():
     out = ROOT / "results" / f"{datetime.date.today()}-stt.jsonl"
     meta = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "git": git_rev(),
             "note": a.note, "host": host}
+    if a.sram is not None:
+        b.request(f"sram {a.sram}")
     with out.open("a") as f:
         for path in a.args:
             pcm = mono16k(path)
@@ -102,8 +105,8 @@ def main():
             print(f"{pathlib.Path(path).name:32s} {info.get('total_ms', 0):7.0f} ms "
                   f"(audio {info.get('audio_ms', 0):5.0f}, fe {info.get('fe_ms', 0):5.0f}, "
                   f"model {info.get('model_ms', 0):6.0f}, load {info.get('load_ms', 0):4.0f})  "
-                  f"RTF {info.get('rtf', 0):.2f} rc={rc} -> {info.get('text')!r}")
-            f.write(json.dumps({**meta, "clip": str(path), "mode": a.mode, "static": a.static, "rc": rc, **info}) + "\n")
+                  f"RTF {info.get('rtf', 0):.2f} fnv {info.get('logits_fnv')} -> {info.get('text')!r}")
+            f.write(json.dumps({**meta, "clip": str(path), "mode": a.mode, "static": a.static, "sram": a.sram, "rc": rc, **info}) + "\n")
 
 
 if __name__ == "__main__":

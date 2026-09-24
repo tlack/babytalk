@@ -45,6 +45,8 @@ extern "C" {
 
 #define PORT 5555
 
+extern "C" void dl_conv_sram_enable(bool on);  // patched ESP-DL (espdl/patches)
+
 static dl::Model *g_model;
 static int g_frames;  // input length the model is built for (frames)
 static SemaphoreHandle_t g_lock;  // model is shared by the TCP task and the console
@@ -155,8 +157,13 @@ static int run_and_decode(Out &o, int T, int mode, double fe_ms, int n_samples, 
     heap_caps_free(wide);
     int64_t dec_us = esp_timer_get_time() - t0;
 
+    // FNV-1a over the decoded logits: bit-exactness check across kernel variants.
+    uint32_t fnv = 2166136261u;
+    const uint8_t *lp = (const uint8_t *)out->data;
+    for (size_t i = 0; i < (size_t)frames * (VOCAB_N + 1) * (out->dtype == dl::DATA_TYPE_INT8 ? 1 : 2); i++)
+        fnv = (fnv ^ lp[i]) * 16777619u;
     // text is lowercase letters, spaces and apostrophes: safe inside a JSON string.
-    o.printf("{\"text\":\"%s\"}\n", text);
+    o.printf("{\"text\":\"%s\",\"logits_fnv\":\"%08lx\"}\n", text, (unsigned long)fnv);
     double audio_ms = n_samples / 16.0;
     double total_ms = fe_ms + run_us / 1000.0 + dec_us / 1000.0;
     o.printf("{\"T\":%d,\"out_frames\":%d,\"mode\":%d,\"audio_ms\":%.0f,\"fe_ms\":%.1f,\"model_ms\":%.1f,"
@@ -303,6 +310,11 @@ static int handle(Out &o, char *line)
     int a2 = argc > 2 ? atoi(argv[2]) : 1;
 
     if (!strcmp(argv[0], "load")) return load_model(o, a1, argc > 2 && a2);
+    if (!strcmp(argv[0], "sram")) {  // sram 0|1: stage 1x1 conv filters in SRAM (patched ESP-DL)
+        dl_conv_sram_enable(a1);
+        o.printf("{\"sram\":%d}\n", a1);
+        return 0;
+    }
     if (!strcmp(argv[0], "listen"))
         return cmd_listen(o, a1, a2, argc > 3 ? atoi(argv[3]) : 1, argc > 4 && atoi(argv[4]));
     if (ensure_model(o)) return 1;
@@ -414,7 +426,12 @@ static void wifi_start(void)
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    esp_err_t e = esp_wifi_init(&cfg);
+    if (e != ESP_OK) {
+        printf("@@ERR esp_wifi_init: %s (internal free %u)\n", esp_err_to_name(e),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        return;
+    }
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL);
     wifi_config_t wc = {};
@@ -423,7 +440,8 @@ static void wifi_start(void)
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wc);
     esp_wifi_set_ps(WIFI_PS_NONE);  // latency over power for a bench app
-    esp_wifi_start();
+    e = esp_wifi_start();
+    if (e != ESP_OK) printf("@@ERR esp_wifi_start: %s\n", esp_err_to_name(e));
 }
 
 // ---------------------------------------------------------------- console
@@ -464,12 +482,12 @@ extern "C" void app_main(void)
     g_lock = xSemaphoreCreateMutex();
     wifi_start();
     // Inference runs in this task: big stack, pinned to core 1 (WiFi lives on core 0).
-    xTaskCreatePinnedToCore(tcp_task, "stt_tcp", 32 * 1024, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(tcp_task, "stt_tcp", 16 * 1024, NULL, 5, NULL, 1);
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_cfg.prompt = "stt>";
-    repl_cfg.task_stack_size = 32 * 1024;
+    repl_cfg.task_stack_size = 16 * 1024;
     esp_console_dev_usb_serial_jtag_config_t hw_cfg = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_cfg, &repl_cfg, &repl));
     esp_console_register_help_command();

@@ -1,0 +1,104 @@
+diff -ruN '--exclude=*.a' '--exclude=CHECKSUMS.json' a/dl/base/dl_base.hpp b/dl/base/dl_base.hpp
+--- a/dl/base/dl_base.hpp	1980-01-01 00:00:00.000000000 -0500
++++ b/dl/base/dl_base.hpp	2026-09-23 23:11:16.085831326 -0400
+@@ -350,6 +350,17 @@
+                 m_args[1].output_element +=
+                     (args.output_height - m_args[1].output_height) * args.output_width * args.output_channel;
+             }
++        } else if (args.input_height == 1 && args.filter_height == 1 && args.filter_width == 1 && args.stride_x == 1 &&
++                   args.padding_w_head == 0 && args.padding_w_tail == 0 && args.output_width >= 32 &&
++                   (runtime_mode == RUNTIME_MODE_MULTI_CORE || runtime_mode == RUNTIME_MODE_AUTO)) {
++            // micromodels: 1D (NWC) 1x1 convs have height 1, so the height split above never
++            // fires. Split along width (time) instead: each core takes half the frames.
++            m_args.push_back(args);
++            int half = args.output_width / 2;
++            m_args[0].input_width = m_args[0].output_width = half;
++            m_args[1].input_width = m_args[1].output_width = args.output_width - half;
++            m_args[1].input_element += half * args.input_channel;
++            m_args[1].output_element += half * args.output_channel;
+         }
+     }
+ 
+diff -ruN '--exclude=*.a' '--exclude=CHECKSUMS.json' a/dl/module/include/dl_module_conv.hpp b/dl/module/include/dl_module_conv.hpp
+--- a/dl/module/include/dl_module_conv.hpp	1980-01-01 00:00:00.000000000 -0500
++++ b/dl/module/include/dl_module_conv.hpp	2026-09-23 23:11:16.095848851 -0400
+@@ -2,6 +2,11 @@
+ 
+ #include "dl_base_conv2d.hpp"
+ #include "dl_base_depthwise_conv2d.hpp"
++#include "esp_memory_utils.h"
++#include <string.h>
++
++// micromodels: fixed internal-SRAM staging buffer for 1x1 conv filters (dl_module_conv_sram.cpp).
++extern "C" void *dl_conv_sram_filter_buf(size_t *cap);
+ #include "dl_module_base.hpp"
+ #include <string>
+ #include <typeinfo>
+@@ -121,6 +126,32 @@
+         }
+     }
+ 
++    /**
++     * micromodels: int8 1x1 convs stream their whole filter once per output pixel, so with
++     * weights left in flash (param_copy=false) the kernel waits on the cache/flash instead of
++     * computing. Copy the filter into a fixed internal-SRAM buffer once per call and point the
++     * args at it: same kernel, same arithmetic (bit-exact), weights now at SRAM speed.
++     */
++    template <typename T, typename filter_t>
++    void stage_filter_in_sram(TensorBase *filter, base::ConvOpArgs<T, filter_t> &args)
++    {
++        if (sizeof(T) != 1 || sizeof(filter_t) != 1 || m_group != 1) return;
++        auto &a0 = args.get_args(0);
++        if (a0.filter_height != 1 || a0.filter_width != 1) return;
++        size_t cap = 0;
++        uint8_t *buf = (uint8_t *)dl_conv_sram_filter_buf(&cap);
++        const uint8_t *src = (const uint8_t *)filter->get_element_ptr();
++        size_t bytes = filter->get_bytes();
++        if (!buf || bytes > cap || esp_ptr_internal(src)) return;
++        memcpy(buf, src, bytes);
++        intptr_t delta = buf - src;
++        for (size_t i = 0; i < args.size(); i++) {
++            auto &a = args.get_args(i);
++            a.filter_element = (const uint8_t *)a.filter_element + delta;
++            if (a.filter_element_unaligned) a.filter_element_unaligned = (const uint8_t *)a.filter_element_unaligned + delta;
++        }
++    }
++
+     void forward(ModelContext *context, runtime_mode_t mode = RUNTIME_MODE_AUTO)
+     {
+         reset_bias(context);
+@@ -157,6 +188,7 @@
+                                              nullptr,
+                                              mode); // do not support RReLU and Leaky RelU
+         int task_size = m_args.size();
++        stage_filter_in_sram<T, filter_t>(filter, m_args);
+         if (task_size == 1) { // single task
+             forward_args((void *)&m_args.get_args(0));
+         } else if (task_size == 2) { // multi task, use semaphore to maintain synchronization.
+diff -ruN '--exclude=*.a' '--exclude=CHECKSUMS.json' a/dl/module/src/dl_module_conv_sram.cpp b/dl/module/src/dl_module_conv_sram.cpp
+--- a/dl/module/src/dl_module_conv_sram.cpp	1969-12-31 19:00:00.000000000 -0500
++++ b/dl/module/src/dl_module_conv_sram.cpp	2026-09-23 23:13:20.329348316 -0400
+@@ -0,0 +1,23 @@
++// micromodels: internal-SRAM staging buffer for int8 1x1 conv filters (see
++// Conv::stage_filter_in_sram). Static .bss so it is reserved before WiFi and the model
++// fragment the heap. 64KB = a 256x256 int8 filter, the shape of nearly every 1x1 conv in
++// Citrinet-256; bigger filters fall back to reading in place.
++#include <stddef.h>
++#include <stdint.h>
++
++#include "esp_attr.h"
++
++#define DL_CONV_SRAM_FILTER_BYTES (64 * 1024)
++
++static DRAM_ATTR uint8_t s_buf[DL_CONV_SRAM_FILTER_BYTES] __attribute__((aligned(16)));
++
++static bool s_enabled = true;
++
++// Runtime switch (for A/B checks against stock behaviour): false = read filters in place.
++extern "C" void dl_conv_sram_enable(bool on) { s_enabled = on; }
++
++extern "C" void *dl_conv_sram_filter_buf(size_t *cap)
++{
++    *cap = s_enabled ? sizeof(s_buf) : 0;
++    return s_enabled ? s_buf : NULL;
++}

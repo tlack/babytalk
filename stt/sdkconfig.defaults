@@ -39,3 +39,8 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# ESP-DL's model metadata is thousands of small mallocs; by default everything <= 16KB
+# goes to internal RAM first (loading the model took ~123KB of it). Keep internal RAM for
+# stacks, WiFi and the 64KB 1x1-conv filter staging buffer (espdl/patches).
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024

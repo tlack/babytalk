@@ -134,7 +134,7 @@ def main():
     ap.add_argument("--loop", action="store_true", help="Enter to record again")
     ap.add_argument("--save", action="store_true", help="keep the audio in data/recordings/")
     ap.add_argument("--no-trim", action="store_true", help="transcribe the whole recording")
-    ap.add_argument("--mode", type=int, default=1, help="ESP-DL runtime: 0 auto, 1 single, 2 multi core")
+    ap.add_argument("--mode", type=int, default=2, help="ESP-DL runtime: 0 auto, 1 single, 2 multi core")
     args = ap.parse_args()
 
     host = args.host or board_ip(args.serial)

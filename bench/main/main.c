@@ -19,6 +19,7 @@ static const bench_t BENCHES[] = {
     {"sd",    "SD read bandwidth, raw + FAT [freq_khz] [file_mb]", bench_sd},
     {"fc",    "int8 FC MAC throughput [in] [out] [frames]", bench_fc},
     {"fc2",   "fc row-reuse kernel on both cores vs one [in] [out] [frames]", bench_fc2},
+    {"rec",   "record the ES7210 mics, dump base64 PCM [secs] [gain 0-14]", bench_rec},
 };
 #define N_BENCHES (sizeof(BENCHES) / sizeof(BENCHES[0]))
 

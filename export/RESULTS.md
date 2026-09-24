@@ -162,3 +162,19 @@ treat differences of a word or two as noise.
   commands (e.g. a shorter static window, or fill with silence + masked SE).
 - int8's extra errors on real audio match its test-clean loss (5.7–5.9 vs 3.4); w8a16
   stays close to float. **The board should run w8a16** until QAT closes the int8 gap.
+
+## 4-bit weights (CB4 codebooks, GPTQ) — 2026-09-24
+
+WER through the host C executor (bit-exact with the board; clip-length input like the
+board, no window tiling, so int8 here differs slightly from the PPQ rows above).
+`int4_eval.py` / `int4_gptq.py`, 128 dev-clean calibration clips.
+
+| weights | test-clean (655) | recordings | your voice | image |
+|---|---|---|---|---|
+| int8 | 6.28 | 12.40 | 12.31 | 9.78 MB |
+| 4-bit GPTQ (act-order + bias corr.) | 8.57 | 10.74 | 9.23 | 5.90 MB |
+| same, first 1x1 + decoder int8 | **8.21** | 10.74 | 9.23 | ~6.1 MB |
+
+Plain per-channel 4-bit k-means without GPTQ: 96% (27-utt slice). On the slice,
+act-order is worth ~2.2 WER, bias correction ~0.2. The recordings set is small: int4
+scoring better than int8 there is within its noise.

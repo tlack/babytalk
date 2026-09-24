@@ -3,6 +3,7 @@
 // multiples of 16.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -19,6 +20,13 @@ extern int mmrt_s3_cores;
 // otherwise, and if that allocation fails later, 1x1 convs quietly run on one core.
 // Returns 0 when both are ready.
 int mmrt_s3_init(void);
+// Free the heap staging buffers (all of them with MMRT_S3_HEAP_BUFFERS, which builds that
+// share internal RAM with other engines define). mmrt_s3_init() brings them back.
+void mmrt_s3_deinit(void);
+// MMRT_S3_HEAP_BUFFERS builds: take the staging buffers (MMRT_S3_BUFFER_BYTES, one block,
+// 16-aligned) from `get` and hand them back through `put` in mmrt_s3_deinit().
+#define MMRT_S3_BUFFER_BYTES (2 * 32 * 1024 + 2 * 16 * 256)
+void mmrt_s3_set_buffer_provider(void *(*get)(size_t bytes), void (*put)(void));
 
 // Diagnostic: cycles per VSMULAS (16 MACs) of the 1x1 row kernel on the calling core.
 float mmrt_s3_c1_bench(int groups, int C, int frames, int where);

@@ -2,7 +2,7 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# app 3MB, model 6MB (int4 .mmrt: 5.99MB), then MicroPython's auto "vfs" (~7MB).
+# app 4MB (stt + tts), model 6MB (int4 .mmrt: 5.99MB), then MicroPython's auto "vfs" (6MB).
 # build.sh copies partitions-stt.csv next to the port's own tables.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-sentry-stt.csv"

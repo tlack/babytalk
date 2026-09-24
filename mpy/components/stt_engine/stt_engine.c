@@ -13,6 +13,11 @@
 #include "mmrt.h"
 #include "mmrt_s3.h"
 #include "stt_core.h"
+#include "sram_pool.h"
+
+#define POOL_OWNER_STT 1
+static void *pool_get(size_t bytes);
+static void pool_put(void);
 
 static mmrt_model_t s_model;
 static int s_open;
@@ -35,17 +40,50 @@ static void *act_alloc(size_t n)
 int stt_engine_open(void)
 {
     if (s_open) return 0;
-    const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "model");
-    const void *img;
-    esp_partition_mmap_handle_t h;
-    if (!p || esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &img, &h) != ESP_OK) return -1;
-    if (mmrt_open(&s_model, img, p->size)) return -2;
+    static const void *img;  // mapped once and kept: close() + open() must not map it again
+    static size_t img_size;
+    if (!img) {
+        const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "model");
+        esp_partition_mmap_handle_t h;
+        if (!p || esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &img, &h) != ESP_OK) {
+            img = NULL;
+            return -1;
+        }
+        img_size = p->size;
+    }
+    if (mmrt_open(&s_model, img, img_size)) return -2;
     const mmrt_header_t *hd = s_model.hdr;
     s_model_bytes = hd->blob_off + hd->blob_size;
+    mmrt_s3_set_buffer_provider(pool_get, pool_put);
     if (mmrt_s3_init()) return -3;
     kws_init(VOCAB, VOCAB_N);
     s_open = 1;
     return 0;
+}
+
+static volatile int s_busy;  // background task state (defined with the task below)
+
+// Staging buffers come from the shared SRAM pool (sram_pool.h); another engine (tts) may
+// take the pool back whenever stt is idle, and the next run re-acquires it.
+static int evict_stt(void)
+{
+    if (s_busy) return -1;
+    mmrt_s3_deinit();
+    return 0;
+}
+static void *pool_get(size_t bytes)
+{
+    return bytes <= SRAM_POOL_BYTES ? sram_pool_acquire(POOL_OWNER_STT, evict_stt) : NULL;
+}
+static void pool_put(void) { sram_pool_release(POOL_OWNER_STT); }
+
+void stt_engine_close(void)
+{
+    if (!s_open || s_busy) return;
+    mmrt_cache_weights(&s_model, 0, psram_alloc, mem_free);
+    mmrt_close(&s_model, mem_free);
+    mmrt_s3_deinit();
+    s_open = 0;
 }
 
 void stt_engine_info(stt_info_t *info)
@@ -93,6 +131,7 @@ int stt_engine_run(const int16_t *pcm, int n, stt_result_t *r)
     if (!s_open) return -1;
     const int T = stt_num_frames(n);
     if (n < MEL_HOP || T > 4 * STT_WIN_FRAMES) return -4;
+    if (mmrt_s3_init()) return -3;  // (re)acquire the staging buffers
     r->frames = T;
     int64_t t0 = esp_timer_get_time();
     float *feats = (float *)psram_alloc(sizeof(float) * T * MEL_N);

@@ -35,6 +35,10 @@ typedef struct {
 int stt_engine_open(void);
 void stt_engine_info(stt_info_t *info);
 
+// Release everything open() took (weight cache, activations, internal staging buffers,
+// phrase): e.g. before running another engine that needs internal RAM. Reopens on demand.
+void stt_engine_close(void);
+
 // Keep up to `bytes` of weights in PSRAM (faster than flash); 0 releases. Returns bytes cached.
 size_t stt_engine_cache(size_t bytes);
 

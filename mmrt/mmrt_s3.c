@@ -50,7 +50,19 @@ void mmrt_s3_colsum16(const int8_t *x, int T, int C, uint8_t *qacc_out);
 // regions (a static one and a heap one): two cores streaming weights out of the same
 // SRAM bank stall each other (measured: 1.17x -> 1.51x dual-core speedup when split).
 #define W_STAGE_BYTES (32 * 1024)
+// Fused dw -> 1x1 tiles, one per core (see "fused depthwise -> 1x1" below).
+#define TILE 16
+#define TILE_C 256
+#ifdef MMRT_S3_HEAP_BUFFERS
+static int8_t (*s_tile)[TILE * TILE_C];
+#else
+static DRAM_ATTR int8_t s_tile[2][TILE * TILE_C] __attribute__((aligned(16)));
+#endif
+#ifdef MMRT_S3_HEAP_BUFFERS  // allocated by mmrt_s3_init(), freed by mmrt_s3_deinit()
+static int8_t *s_wstage0;
+#else
 static DRAM_ATTR int8_t s_wstage0[W_STAGE_BYTES] __attribute__((aligned(16)));
+#endif
 static int8_t *s_wstage1;  // heap: mmrt_s3_init(), else on first use
 static DRAM_ATTR uint8_t s_bias_q[64 * 48] __attribute__((aligned(16)));  // up to 768 outputs
 
@@ -97,11 +109,66 @@ static void ensure_worker(void)
     }
 }
 
+static int buffers_ready(void)
+{
+#ifdef MMRT_S3_HEAP_BUFFERS
+    return s_wstage0 && s_wstage1 && s_tile;
+#else
+    return s_wstage1 != NULL;
+#endif
+}
+
+#ifdef MMRT_S3_HEAP_BUFFERS
+// All three buffers as one block from the app's provider (e.g. an SRAM pool shared with
+// another engine), else three heap allocations.
+static void *(*s_buf_get)(size_t);
+static void (*s_buf_put)(void);
+static int s_buf_provided;
+
+void mmrt_s3_set_buffer_provider(void *(*get)(size_t bytes), void (*put)(void))
+{
+    s_buf_get = get;
+    s_buf_put = put;
+}
+#endif
+
 int mmrt_s3_init(void)
 {
+#ifdef MMRT_S3_HEAP_BUFFERS
+    if (!s_wstage0 && s_buf_get) {
+        int8_t *m = (int8_t *)s_buf_get(MMRT_S3_BUFFER_BYTES);
+        if (m) {
+            s_wstage0 = m;
+            s_wstage1 = m + W_STAGE_BYTES;
+            s_tile = (int8_t (*)[TILE * TILE_C])(m + 2 * W_STAGE_BYTES);
+            s_buf_provided = 1;
+        }
+    }
+    if (!s_wstage0) s_wstage0 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
+    if (!s_tile) s_tile = heap_caps_aligned_alloc(16, 2 * TILE * TILE_C, MALLOC_CAP_INTERNAL);
+#endif
     if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
     ensure_worker();
-    return s_wstage1 && s_go ? 0 : -1;
+    return buffers_ready() && s_go ? 0 : -1;
+}
+
+void mmrt_s3_deinit(void)
+{
+#ifdef MMRT_S3_HEAP_BUFFERS
+    if (s_buf_provided) {
+        s_buf_provided = 0;
+        s_wstage0 = s_wstage1 = NULL;
+        s_tile = NULL;
+        if (s_buf_put) s_buf_put();
+        return;
+    }
+    heap_caps_free(s_wstage0);
+    heap_caps_free(s_tile);
+    s_wstage0 = NULL;
+    s_tile = NULL;
+#endif
+    heap_caps_free(s_wstage1);
+    s_wstage1 = NULL;
 }
 
 // ---------------------------------------------------------------- weight streaming
@@ -160,8 +227,7 @@ static void streamer(void *arg, int part)
 int mmrt_s3_stream_begin(const mmrt_s3_stream_op_t *ops, int n_ops, int T_in)
 {
     if (!mmrt_s3_stage || mmrt_s3_cores < 2 || T_in > mmrt_s3_stream_max_T || n_ops == 0) return 0;
-    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
-    if (!s_wstage1) return 0;
+    if (mmrt_s3_init()) return 0;
     for (int i = 0; i < n_ops; i++)
         if (ops[i].C * 16 > SLOT_BYTES || ops[i].N % 16) return 0;
     ensure_worker();
@@ -291,7 +357,10 @@ void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, int wfmt
         S.op_seq++;
         return;
     }
-    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
+    mmrt_s3_init();
+#ifdef MMRT_S3_HEAP_BUFFERS
+    if (!s_wstage0) abort();  // no staging buffer: mmrt_s3_init() could not allocate it
+#endif
     const int two = mmrt_s3_cores == 2 && s_wstage1;
     const int groups = N / 16;
     const size_t group_bytes = (size_t)C * 16;
@@ -350,9 +419,6 @@ static void dw_part(void *arg, int part)
 // bus-bound, and this removes a write + read of a [T][C] tensor per pair of ops.
 // The 1x1 weights are staged as two halves in the two separate-bank buffers; core 0
 // runs half A then B per tile, core 1 B then A, so they tend to read different banks.
-#define TILE 16
-#define TILE_C 256
-static DRAM_ATTR int8_t s_tile[2][TILE * TILE_C] __attribute__((aligned(16)));
 
 typedef struct {
     dw_job_t dw;         // dw.y unused
@@ -395,8 +461,7 @@ int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, i
     if (!mmrt_s3_fuse || S.active || C > TILE_C || (size_t)(G - gA) * gb > W_STAGE_BYTES ||
         (size_t)gA * gb > W_STAGE_BYTES || K < 3)
         return 0;
-    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
-    if (!s_wstage1) return 0;
+    if (mmrt_s3_init()) return 0;  // falls back to the unfused ops
     int64_t t0 = esp_timer_get_time();
     mmrt_wload(s_wstage0, pw_w, pw_wfmt, C, 0, gA);
     mmrt_wload(s_wstage1, pw_w, pw_wfmt, C, gA, G - gA);

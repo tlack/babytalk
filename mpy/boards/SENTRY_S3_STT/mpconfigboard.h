@@ -12,3 +12,7 @@
 
 #define MICROPY_HW_I2C0_SCL                 (9)
 #define MICROPY_HW_I2C0_SDA                 (8)
+
+// No Bluetooth (sdkconfig.ble dropped in mpconfigboard.cmake): without this define the
+// port still compiles its NimBLE glue and fails on the missing headers.
+#define MICROPY_PY_BLUETOOTH                (0)

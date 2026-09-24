@@ -42,6 +42,16 @@ static mp_obj_t stt_open(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(stt_open_obj, stt_open);
 
+// close(): give back stt's internal RAM and PSRAM (e.g. before tts.say); reopens on demand.
+static mp_obj_t stt_close(void)
+{
+    if (stt_engine_busy()) mp_raise_OSError(MP_EBUSY);
+    stt_engine_close();
+    s_has_last = 0;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(stt_close_obj, stt_close);
+
 // transcribe(pcm, channels=1) -> str
 static mp_obj_t stt_transcribe(size_t n_args, const mp_obj_t *args)
 {
@@ -194,6 +204,7 @@ static MP_DEFINE_CONST_FUN_OBJ_0(stt_info_obj, stt_info);
 static const mp_rom_map_elem_t stt_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_stt)},
     {MP_ROM_QSTR(MP_QSTR_open), MP_ROM_PTR(&stt_open_obj)},
+    {MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&stt_close_obj)},
     {MP_ROM_QSTR(MP_QSTR_transcribe), MP_ROM_PTR(&stt_transcribe_obj)},
     {MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&stt_start_obj)},
     {MP_ROM_QSTR(MP_QSTR_busy), MP_ROM_PTR(&stt_busy_obj)},

@@ -82,6 +82,8 @@ def main():
     ap.add_argument("--qtype", default=None, help="ESP-PPQ quant_type override, e.g. w8a16")
     ap.add_argument("--src", default=str(MODELS / "citrinet256_static1600.onnx"))
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--eval-set", default="test-clean", choices=["test-clean", "recordings"],
+                    help="recordings = board mic clips in data/recordings (see recordings.py)")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
 
@@ -169,7 +171,11 @@ def main():
             return ex.forward(inputs=x)[0][0].float()
 
         # float reference on the same subset, same static pipeline
-        items = load_split()[:: a.every]
+        if a.eval_set == "recordings":
+            from recordings import load_recordings
+            items = load_recordings()
+        else:
+            items = load_split()[:: a.every]
         evalwer._G.update(m=m, feat=feat, vocab=vocab, mode="fixed", fill="tile16", long="overlap")
         t0 = time.time()
         rows_f = [evalwer._one(it) for it in items]
@@ -181,6 +187,12 @@ def main():
                 print(f"  {i}/{len(items)}  {time.time() - t0:.0f}s", flush=True)
         del evalwer._G["runner"]
         wf, wq = score(rows_f), score(rows_q)
+        if a.eval_set == "recordings":
+            from citrinet import normalize_text
+            for (uid, ref, hf, _), (_, _, hq, _) in zip(rows_f, rows_q):
+                print(f"{uid:34s} float: {normalize_text(hf)}\n{'':34s} quant: {normalize_text(hq)}")
+            mine = [i for i, r in enumerate(rows_q) if r[0].startswith("me-")]
+            print(f"live voice: float {score([rows_f[i] for i in mine]):.2f}%  quant {score([rows_q[i] for i in mine]):.2f}%")
         summ.update(n=len(items), wer_float_static=round(wf, 3), wer_quant=round(wq, 3),
                     eval_secs=round(time.time() - t0, 1))
         RESULTS.mkdir(parents=True, exist_ok=True)

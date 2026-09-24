@@ -311,6 +311,8 @@ def read_audio(path) -> torch.Tensor:
 
     a, sr = sf.read(str(path), dtype="float32")
     assert sr == 16000
+    if a.ndim == 2:  # board recordings are stereo (mic1, mic2): use mic1
+        a = a[:, 0].copy()
     return torch.from_numpy(a)
 
 

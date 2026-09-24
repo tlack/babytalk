@@ -15,6 +15,9 @@ extern int mmrt_s3_stage;
 void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
                      int stride, int shift, int relu, int8_t *y, int T_out);
 
+void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,
+                    int shift, int relu, int8_t *y, int T_out);
+
 #ifdef __cplusplus
 }
 #endif

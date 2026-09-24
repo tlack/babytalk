@@ -103,3 +103,67 @@ mmrt_s3_conv1x1_row:
     bnez    a8, .Lc1_group
     retw
     .size   mmrt_s3_conv1x1_row, .-mmrt_s3_conv1x1_row
+
+// void mmrt_s3_dw_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dw_t *a)
+//
+// One output frame of a depthwise conv, all channel groups. The C driver clips the
+// taps to the clip (zero padding contributes nothing) and passes the first valid ones:
+//   x: input row of the first valid tap (+ g*16 per group), rows C bytes apart
+//   w: [groups][K][16] weights, pointing at the first valid tap of group 0
+//   a: nk (valid taps >= 1), C (row stride), groups, K16 (group stride of w = K*16),
+//      shift (>= 0), relu
+// Per group: QACC[i] = sum_k x[k][i] * w[k][i] (VMULAS, 16 lanes), rounded as for 1x1.
+    .align 4
+    .global mmrt_s3_dw_row
+    .type   mmrt_s3_dw_row, @function
+mmrt_s3_dw_row:
+    entry   a1, 32
+    l32i    a6, a5, 0           // nk
+    l32i    a7, a5, 4           // C (bytes between input rows)
+    l32i    a8, a5, 8           // groups
+    l32i    a14, a5, 12         // K16
+    l32i    a10, a5, 16         // shift
+    l32i    a11, a5, 20         // relu
+    movi    a12, 0x101
+    slli    a13, a12, 16
+    or      a12, a12, a13
+    ee.movi.32.q q7, a12, 0
+    ee.movi.32.q q7, a12, 1
+    ee.movi.32.q q7, a12, 2
+    ee.movi.32.q q7, a12, 3
+    ee.zero.q q6
+    addi    a15, a6, -1         // loop count: nk - 1 (the last tap is peeled)
+
+.Ldw_group:
+    mov     a9, a3              // x (this group's 16 channels)
+    mov     a13, a4             // w (this group)
+    ee.zero.qacc
+    ee.vld.128.xp q0, a9, a7    // x tap 0
+    ee.vld.128.ip q1, a13, 16   // w tap 0
+    loopgtz a15, .Ldw_last
+    ee.vmulas.s8.qacc.ld.ip q1, a13, 16, q0, q1     // acc += x*w; next w
+    ee.vld.128.xp q0, a9, a7                        // next x
+.Ldw_last:
+    ee.vmulas.s8.qacc q0, q1
+
+    beqz    a10, .Ldw_shift0
+    addi    a12, a10, -1
+    ee.srcmb.s8.qacc q3, a12, 0
+    movi    a12, 1
+    ee.movi.32.q q3, a12, 0
+    ee.vsmulas.s8.qacc q7, q3, 0
+    ee.srcmb.s8.qacc q3, a12, 0
+    j       .Ldw_rounded
+.Ldw_shift0:
+    ee.srcmb.s8.qacc q3, a10, 0
+.Ldw_rounded:
+    beqz    a11, .Ldw_store
+    ee.vmax.s8 q3, q3, q6
+.Ldw_store:
+    ee.vst.128.ip q3, a2, 16
+    addi    a3, a3, 16          // next channel group
+    add     a4, a4, a14
+    addi    a8, a8, -1
+    bnez    a8, .Ldw_group
+    retw
+    .size   mmrt_s3_dw_row, .-mmrt_s3_dw_row

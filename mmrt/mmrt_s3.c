@@ -16,6 +16,17 @@ typedef struct {
 
 void mmrt_s3_conv1x1_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_c1_t *a);
 
+typedef struct {
+    int nk;
+    int C;
+    int groups;
+    int K16;
+    int shift;
+    int relu;
+} mmrt_s3_dw_t;
+
+void mmrt_s3_dw_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dw_t *a);
+
 // Internal-SRAM staging: 1x1 weights are re-read for every output frame, so they are
 // copied here (from flash) once per op instead of streaming through the cache per frame.
 #define W_STAGE_BYTES (64 * 1024)
@@ -60,5 +71,18 @@ void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const in
         mmrt_s3_c1_t a = {bias ? s_bias_q + (size_t)g0 * 64 : NULL, C / 16 - 1, ng, shift, relu};
         for (int t = 0; t < T_out; t++)
             mmrt_s3_conv1x1_row(y + (size_t)t * N + g0 * 16, x + (size_t)t * stride * C, wg, &a);
+    }
+}
+
+void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,
+                    int shift, int relu, int8_t *y, int T_out)
+{
+    mmrt_s3_dw_t a = {0, C, C / 16, K * 16, shift, relu};
+    for (int t = 0; t < T_out; t++) {
+        int start = t * stride - pad;  // input frame of tap 0
+        int k0 = start < 0 ? -start : 0;
+        int k1 = start + K > T_in ? T_in - start : K;
+        a.nk = k1 - k0;
+        mmrt_s3_dw_row(y + (size_t)t * C, x + (size_t)(start + k0) * C, w + k0 * 16, &a);
     }
 }

@@ -78,7 +78,12 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
         const int8_t *w = (const int8_t *)(m->blob + op->w_off);
         switch (op->kind) {
         case MMRT_DWCONV:
-            mmrt_dwconv_ref(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
+#ifdef MMRT_S3
+            if (!mmrt_use_ref)
+                mmrt_s3_dwconv(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
+            else
+#endif
+                mmrt_dwconv_ref(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
             break;
         case MMRT_CONV1X1:
         {

@@ -350,6 +350,35 @@ static int ktest(Out &o)
             o.printf("{\"at\":%d,\"ref\":%d,\"s3\":%d}\n", first, y0[first], y1[first]);
         psram_free(x); psram_free(w); psram_free(y0); psram_free(y1); psram_free(b);
     }
+    struct { int C, K, T_in, stride, pad, shift, relu; } dcases[] = {
+        {80, 5, 64, 1, 2, 5, 0},    {256, 11, 64, 1, 5, 6, 0},  {256, 11, 64, 2, 5, 7, 0},
+        {256, 41, 64, 1, 20, 7, 0}, {256, 41, 8, 1, 20, 6, 0},  {256, 25, 200, 1, 12, 7, 1},
+        {256, 13, 1, 1, 6, 5, 0},   {256, 11, 7, 2, 5, 0, 0},
+    };
+    for (auto &c : dcases) {
+        int T_out = (c.T_in + 2 * c.pad - c.K) / c.stride + 1;
+        size_t xn = (size_t)c.T_in * c.C, wn = (size_t)c.C * c.K, yn = (size_t)T_out * c.C;
+        int8_t *x = (int8_t *)psram_alloc(xn), *w = (int8_t *)psram_alloc(wn);
+        int8_t *y0 = (int8_t *)psram_alloc(yn), *y1 = (int8_t *)psram_alloc(yn);
+        for (size_t i = 0; i < xn; i++) x[i] = rnd8();
+        for (size_t i = 0; i < wn; i++) w[i] = rnd8();
+        int64_t t0 = esp_timer_get_time();
+        mmrt_dwconv_ref(x, c.T_in, c.C, w, c.K, c.stride, c.pad, c.shift, c.relu, y0, T_out);
+        int64_t t_ref = esp_timer_get_time() - t0;
+        t0 = esp_timer_get_time();
+        mmrt_s3_dwconv(x, c.T_in, c.C, w, c.K, c.stride, c.pad, c.shift, c.relu, y1, T_out);
+        int64_t t_s3 = esp_timer_get_time() - t0;
+        int bad = 0, first = -1;
+        for (size_t i = 0; i < yn; i++)
+            if (y0[i] != y1[i]) { if (first < 0) first = (int)i; bad++; }
+        fails += bad > 0;
+        o.printf("{\"kernel\":\"dwconv\",\"C\":%d,\"K\":%d,\"T_in\":%d,\"stride\":%d,\"shift\":%d,\"relu\":%d,"
+                 "\"bad\":%d,\"first_bad\":%d,\"ref_us\":%lld,\"s3_us\":%lld,\"gmacs\":%.3f,\"speedup\":%.1f}\n",
+                 c.C, c.K, c.T_in, c.stride, c.shift, c.relu, bad, first, (long long)t_ref, (long long)t_s3,
+                 (double)T_out * c.C * c.K / (t_s3 > 0 ? t_s3 : 1) / 1000.0, (double)t_ref / (t_s3 > 0 ? t_s3 : 1));
+        if (first >= 0) o.printf("{\"at\":%d,\"ref\":%d,\"s3\":%d}\n", first, y0[first], y1[first]);
+        psram_free(x); psram_free(w); psram_free(y0); psram_free(y1);
+    }
     return fails;
 }
 

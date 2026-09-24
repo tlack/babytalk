@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--bc", action="store_true", help="bias correction")
     ap.add_argument("--algo", default=None, help="activation calib algorithm (default kl): kl|percentile|mse|minmax")
     ap.add_argument("--int16-re", default=None, help="regex: extra ops (by name) dispatched to int16")
+    ap.add_argument("--w8a16-re", default=None, help="regex: ops (by name) dispatched to w8a16 (int16 activations)")
     ap.add_argument("--report", action="store_true", help="print PPQ graphwise error (SNR) per op")
     ap.add_argument("--qtype", default=None, help="ESP-PPQ quant_type override, e.g. w8a16")
     ap.add_argument("--src", default=str(MODELS / "citrinet256_static1600.onnx"))
@@ -112,6 +113,14 @@ def main():
         for n in onnx.load(str(src)).graph.node:
             if re.search(a.int16_re, n.name):
                 setting.dispatching_table.append(n.name, get_target_platform("esp32s3", 16))
+    if a.w8a16_re:
+        import re
+
+        import onnx
+
+        for n in onnx.load(str(src)).graph.node:
+            if re.search(a.w8a16_re, n.name):
+                setting.dispatching_table.append(n.name, get_target_platform("esp32s3", "w8a16"))
     if a.eq:
         setting.equalization = True
         setting.equalization_setting.opt_level = 2

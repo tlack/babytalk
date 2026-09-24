@@ -32,13 +32,6 @@ typedef struct {
 
 void mmrt_s3_dw_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dw_t *a);
 
-typedef struct {
-    int nrows, pairs, C, groups, K16, rowstride, shift, relu;
-    const uint8_t *rnd;  // 64-byte QACC image: 2^(shift-1) in every lane
-    int odd;
-} mmrt_s3_dwr_t;
-
-void mmrt_s3_dw_rows(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dwr_t *a);
 
 typedef struct {
     int groups;
@@ -314,32 +307,18 @@ typedef struct {
     int T_in, C, K, stride, pad, shift, relu, T_out;
 } dw_job_t;
 
-int mmrt_s3_dw_fast = 1;  // 1: interior frames via mmrt_s3_dw_rows
-
 // Depthwise output frames [b, e) written to ydst (frame b first, rows C bytes apart):
-// the tensor itself, or a fused op's SRAM tile. core picks the rounding-constant buffer.
-static void dw_frames(const dw_job_t *j, int b, int e, int8_t *ydst, int core)
+// the tensor itself, or a fused op's SRAM tile.
+//
+// (A frame-loop-in-assembly variant with two-tap software pipelining, mmrt_s3_dw_rows,
+// was tried and removed: no faster end to end -- depthwise is bus-bound -- and on two
+// cores it rarely (~1e-3 per call) produced one wrong 32-bit word in an output row. The
+// same loop with a nop before the loop end, or unpipelined, was clean; see
+// mmrt/README.md and the `dwstress` command.)
+static void dw_frames(const dw_job_t *j, int b, int e, int8_t *ydst)
 {
     mmrt_s3_dw_t a = {0, j->C, j->C / 16, j->K * 16, j->shift, j->relu};
-    // interior frames: every tap inside the clip
-    int in0 = (j->pad + j->stride - 1) / j->stride;                   // first t with start >= 0
-    int in1 = j->T_in - j->K + j->pad >= 0 ? (j->T_in - j->K + j->pad) / j->stride + 1 : 0;  // first t past the end
-    if (in0 < b) in0 = b;
-    if (in1 > e) in1 = e;
-    if (!mmrt_s3_dw_fast || in1 <= in0 || j->K < 3) in0 = in1 = e;
     for (int t = b; t < e; t++) {
-        if (t == in0) {
-            static DRAM_ATTR uint8_t rnd_core[2][64] __attribute__((aligned(16)));
-            uint8_t *rnd = rnd_core[core];
-            int32_t r[16];
-            for (int i = 0; i < 16; i++) r[i] = j->shift > 0 ? 1 << (j->shift - 1) : 0;
-            pack_bias(r, 16, rnd);
-            int odd = j->K & 1, pairs = odd ? (j->K - 3) / 2 : (j->K - 2) / 2;
-            mmrt_s3_dwr_t ra = {in1 - in0, pairs, j->C, j->C / 16, j->K * 16, j->stride * j->C, j->shift, j->relu, rnd, odd};
-            mmrt_s3_dw_rows(ydst + (size_t)(t - b) * j->C, j->x + (size_t)(t * j->stride - j->pad) * j->C, j->w, &ra);
-            t = in1 - 1;
-            continue;
-        }
         int start = t * j->stride - j->pad;  // input frame of tap 0
         int k0 = start < 0 ? -start : 0;
         int k1 = start + j->K > j->T_in ? j->T_in - start : j->K;
@@ -353,7 +332,7 @@ static void dw_part(void *arg, int part)
     dw_job_t *j = (dw_job_t *)arg;
     int b, e;
     part_range(j->T_out, part, &b, &e);
-    dw_frames(j, b, e, j->y + (size_t)b * j->C, part == 1);
+    dw_frames(j, b, e, j->y + (size_t)b * j->C);
 }
 
 // ---------------------------------------------------------------- fused depthwise -> 1x1
@@ -383,7 +362,7 @@ static void fused_part(void *arg, int part)
     int8_t *tile = s_tile[core];
     for (int t0 = b; t0 < e; t0 += TILE) {
         int t1 = t0 + TILE < e ? t0 + TILE : e;
-        dw_frames(&j->dw, t0, t1, tile, core);
+        dw_frames(&j->dw, t0, t1, tile);
         for (int pass = 0; pass < 2; pass++) {
             int useB = pass ^ core;
             const mmrt_s3_c1_t *a = useB ? &j->aB : &j->aA;

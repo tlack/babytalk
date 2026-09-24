@@ -138,8 +138,29 @@ static int load_model(Out &o)
 static int64_t g_kind_us[8], g_last_us;
 static int32_t *g_op_us;  // [n_ops] when profiling
 static int16_t *g_op_T;
-static void on_op(int i, const mmrt_op_t *op, const int8_t *, int T, int)
+static uint32_t *g_op_fnv;  // [n_ops] output hashes (`prof <T> 1`: find where runs diverge)
+static int g_dump_op = -1;  // `prof <T> 1 <op>`: also send that op's output tensor
+static int8_t *g_dump;
+static size_t g_dump_n;
+static uint16_t *g_frame_h;  // op 99999: per-frame 16-bit hashes of every op [n_ops][g_frame_T]
+static int g_frame_T;
+static void on_op(int i, const mmrt_op_t *op, const int8_t *y, int T, int C)
 {
+    if (g_op_fnv) {
+        uint32_t h = 2166136261u;
+        for (size_t k = 0; k < (size_t)T * C; k++) h = (h ^ (uint8_t)y[k]) * 16777619u;
+        g_op_fnv[i] = h;
+        if (g_frame_h)
+            for (int t = 0; t < T && t < g_frame_T; t++) {
+                uint32_t f = 2166136261u;
+                for (int c = 0; c < C; c++) f = (f ^ (uint8_t)y[(size_t)t * C + c]) * 16777619u;
+                g_frame_h[(size_t)i * g_frame_T + t] = (uint16_t)(f ^ (f >> 16));
+            }
+        if (i == g_dump_op && (g_dump = (int8_t *)psram_alloc((size_t)T * C))) {
+            memcpy(g_dump, y, (size_t)T * C);
+            g_dump_n = (size_t)T * C;
+        }
+    }
     int64_t now = esp_timer_get_time();
     g_kind_us[op->kind & 7] += now - g_last_us;
     if (g_op_us) {
@@ -672,6 +693,13 @@ static int handle(Out &o, char *line)
         o.printf("{\"cores\":%d}\n", a1);
         return 0;
     }
+    if (!strcmp(argv[0], "cache")) {  // cache <KB>: 1x1 weights resident in PSRAM (0 = none)
+        int64_t t0 = esp_timer_get_time();
+        size_t got = mmrt_cache_weights(&g_model, (size_t)a1 * 1024, psram_alloc, psram_free);
+        o.printf("{\"cached_kb\":%u,\"ms\":%.0f,\"psram_free\":%u}\n", (unsigned)(got / 1024),
+                 (esp_timer_get_time() - t0) / 1000.0, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        return 0;
+    }
     if (!strcmp(argv[0], "fuse")) {  // fuse 0|1: depthwise -> 1x1 fusion
         mmrt_s3_fuse = a1;
         o.printf("{\"fuse\":%d}\n", a1);
@@ -680,12 +708,6 @@ static int handle(Out &o, char *line)
     if (!strcmp(argv[0], "stream")) {  // stream <max_T>: weight streaming below this input length
         mmrt_s3_stream_max_T = a1;
         o.printf("{\"stream_max_T\":%d}\n", a1);
-        return 0;
-    }
-    if (!strcmp(argv[0], "dwfast")) {
-        extern int mmrt_s3_dw_fast;
-        mmrt_s3_dw_fast = a1;
-        o.printf("{\"dw_fast\":%d}\n", a1);
         return 0;
     }
     if (!strcmp(argv[0], "stage")) {  // stage 0|1: SRAM-stage 1x1 weights
@@ -731,6 +753,53 @@ static int handle(Out &o, char *line)
         psram_free(w); psram_free(y); psram_free(xp); heap_caps_free(xs);
         return 0;
     }
+    if (!strcmp(argv[0], "dwstress")) {  // dwstress <K> <iters> [x_sram y_sram xoff yoff gap]: 2-core dw vs 1-core, bit-exact?
+        const int C = 256, K = a1 > 0 ? a1 : 15, T = 160, pad = K / 2, iters = argc > 2 ? atoi(argv[2]) : 100;
+        const bool xs = argc > 3 && atoi(argv[3]), ys = argc > 4 && atoi(argv[4]);
+        const int xoff = argc > 5 ? atoi(argv[5]) : 0, yoff = argc > 6 ? atoi(argv[6]) : 0;  // shift x, y (16B units)
+        const int gap = argc > 7 ? atoi(argv[7]) : 0;  // bytes of PSRAM taken first (heap layout)
+        void *gapb = gap ? psram_alloc(gap) : NULL;
+        int8_t *w = (int8_t *)psram_alloc(C * K), *ref = (int8_t *)psram_alloc(T * C);
+        int8_t *xb = (int8_t *)heap_caps_aligned_alloc(16, T * C + xoff * 16, xs ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM);
+        int8_t *yb = (int8_t *)heap_caps_aligned_alloc(16, T * C + yoff * 16, ys ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM);
+        int8_t *x = xb + xoff * 16, *y = yb + yoff * 16;
+        if (!w || !ref || !xb || !yb) {
+            o.printf("{\"error\":\"alloc\"}\n");
+            psram_free(w); psram_free(ref); heap_caps_free(xb); heap_caps_free(yb); psram_free(gapb);
+            return 1;
+        }
+        o.printf("{\"w\":\"%p\",\"x\":\"%p\",\"y\":\"%p\"}\n", w, x, y);
+        for (int i = 0; i < C * K; i++) w[i] = rnd8();
+        for (int i = 0; i < T * C; i++) x[i] = rnd8();
+        int save = mmrt_s3_cores;
+        mmrt_s3_cores = 1;
+        mmrt_s3_dwconv(x, T, C, w, K, 1, pad, 7, 0, ref, T);
+        mmrt_s3_cores = save;
+        int bad = 0, shown = 0;
+        int64_t t0 = esp_timer_get_time();
+        for (int r = 0; r < iters; r++) {
+            mmrt_s3_dwconv(x, T, C, w, K, 1, pad, 7, 0, y, T);
+            if (!memcmp(y, ref, T * C)) continue;
+            bad++;
+            for (int t = 0; t < T && shown < 4; t++) {
+                if (!memcmp(y + t * C, ref + t * C, C)) continue;
+                int first = -1, n = 0;
+                for (int c = 0; c < C; c++)
+                    if (y[t * C + c] != ref[t * C + c]) { if (first < 0) first = c; n++; }
+                o.printf("{\"iter\":%d,\"t\":%d,\"first_c\":%d,\"n_diff\":%d,\"ref\":[", r, t, first, n);
+                int g = first / 16 * 16;
+                for (int c = g; c < g + 16; c++) o.printf("%s%d", c > g ? "," : "", ref[t * C + c]);
+                o.printf("],\"got\":[");
+                for (int c = g; c < g + 16; c++) o.printf("%s%d", c > g ? "," : "", y[t * C + c]);
+                o.printf("]}\n");
+                shown++;
+            }
+        }
+        o.printf("{\"K\":%d,\"iters\":%d,\"bad\":%d,\"cores\":%d,\"x_sram\":%d,\"y_sram\":%d,\"us\":%lld}\n",
+                 K, iters, bad, mmrt_s3_cores, xs, ys, (long long)((esp_timer_get_time() - t0) / iters));
+        psram_free(w); psram_free(ref); heap_caps_free(xb); heap_caps_free(yb); psram_free(gapb);
+        return 0;
+    }
     if (!strcmp(argv[0], "fe")) {  // fe <n_samples> + PCM: the board's int8 model input ("FEATS")
         int n = a1, T = stt_num_frames(n), rc = 1;
         int16_t *pcm = (int16_t *)psram_alloc((size_t)n * 2);
@@ -757,6 +826,13 @@ static int handle(Out &o, char *line)
         int8_t *x = (int8_t *)psram_alloc((size_t)T * MEL_N);
         g_op_us = (int32_t *)calloc(n, 4);
         g_op_T = (int16_t *)calloc(n, 2);
+        if (argc > 2 && atoi(argv[2])) g_op_fnv = (uint32_t *)calloc(n, 4);
+        g_dump_op = argc > 3 ? atoi(argv[3]) : -1;
+        if (g_dump_op == 99999) {
+            g_frame_T = T;
+            g_frame_h = (uint16_t *)psram_alloc((size_t)n * T * 2);
+            if (g_frame_h) memset(g_frame_h, 0, (size_t)n * T * 2);
+        }
         int rc = 1;
         extern int64_t mmrt_s3_stage_us[2], mmrt_s3_c1_us[2];
         memset(mmrt_s3_stage_us, 0, sizeof(mmrt_s3_stage_us));
@@ -768,7 +844,27 @@ static int handle(Out &o, char *line)
             o.printf("OPS");
             for (int i = 0; i < n; i++) o.printf(" %d:%d", (int)g_op_us[i], (int)g_op_T[i]);
             o.printf("\n");
+            if (g_op_fnv) {
+                o.printf("HASH");
+                for (int i = 0; i < n; i++) o.printf(" %08lx", (unsigned long)g_op_fnv[i]);
+                o.printf("\n");
+            }
+            if (g_dump) {
+                o.printf("DUMP %u\n", (unsigned)g_dump_n);
+                o.write(g_dump, g_dump_n);
+            }
         }
+        if (g_frame_h && rc == 0) {
+            o.printf("DUMP %u\n", (unsigned)(n * T * 2));
+            o.write(g_frame_h, (size_t)n * T * 2);
+        }
+        psram_free(g_frame_h);
+        g_frame_h = NULL;
+        psram_free(g_dump);
+        g_dump = NULL;
+        g_dump_op = -1;
+        free(g_op_fnv);
+        g_op_fnv = NULL;
         free(g_op_us);
         free(g_op_T);
         g_op_us = NULL;

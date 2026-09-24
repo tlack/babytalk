@@ -4,7 +4,12 @@
 #include <string.h>
 
 #include "esp_attr.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_memory_utils.h"
+#include "esp_heap_caps.h"
 
 typedef struct {
     const uint8_t *bias_q;
@@ -36,13 +41,71 @@ typedef struct {
 void mmrt_s3_tail_row(int8_t *y, const int8_t *a, const int8_t *s, const int8_t *r, const mmrt_s3_tail_t *t);
 void mmrt_s3_colsum16(const int8_t *x, int T, int C, uint8_t *qacc_out);
 
-// Internal-SRAM staging: 1x1 weights are re-read for every output frame, so they are
-// copied here (from flash) once per op instead of streaming through the cache per frame.
-#define W_STAGE_BYTES (64 * 1024)
-static DRAM_ATTR int8_t s_wstage[W_STAGE_BYTES] __attribute__((aligned(16)));
+// Internal-SRAM staging. 1x1 weights are re-read for every output frame, so each op
+// copies them out of flash once. Each core gets its own 32KB buffer, in separate SRAM
+// regions (a static one and a heap one): two cores streaming weights out of the same
+// SRAM bank stall each other (measured: 1.17x -> 1.51x dual-core speedup when split).
+#define W_STAGE_BYTES (32 * 1024)
+static DRAM_ATTR int8_t s_wstage0[W_STAGE_BYTES] __attribute__((aligned(16)));
+static int8_t *s_wstage1;  // heap, allocated on first use
 static DRAM_ATTR uint8_t s_bias_q[64 * 48] __attribute__((aligned(16)));  // up to 768 outputs
 
 int mmrt_s3_stage = 1;
+int mmrt_s3_cores = 2;
+
+// ---------------------------------------------------------------- two-core split
+// A persistent worker pinned to core 0 runs half of each kernel while the caller (the
+// inference task on core 1) runs the other half. Work is split by output frames only,
+// so results are identical to one core.
+typedef void (*part_fn)(void *arg, int part);
+static part_fn s_fn;
+static void *s_arg;
+static SemaphoreHandle_t s_go, s_done;
+
+int64_t mmrt_s3_part_us[2];  // wall time of each core's part in the last split call
+
+static void timed(part_fn fn, void *arg, int part)
+{
+    int64_t t0 = esp_timer_get_time();
+    fn(arg, part);
+    mmrt_s3_part_us[part] = esp_timer_get_time() - t0;
+}
+
+static void worker(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        xSemaphoreTake(s_go, portMAX_DELAY);
+        timed(s_fn, s_arg, 0);
+        xSemaphoreGive(s_done);
+    }
+}
+
+static void run_parts(part_fn fn, void *arg)
+{
+    if (mmrt_s3_cores < 2) {
+        fn(arg, -1);  // whole range
+        return;
+    }
+    if (!s_go) {
+        s_go = xSemaphoreCreateBinary();
+        s_done = xSemaphoreCreateBinary();
+        xTaskCreatePinnedToCore(worker, "mmrt_w0", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0);
+    }
+    s_fn = fn;
+    s_arg = arg;
+    xSemaphoreGive(s_go);
+    timed(fn, arg, 1);
+    xSemaphoreTake(s_done, portMAX_DELAY);
+}
+
+// [begin, end) of n items for a part (-1 = all, 0 = first half, 1 = second half)
+static void part_range(int n, int part, int *b, int *e)
+{
+    int h = n / 2;
+    *b = part == 1 ? h : 0;
+    *e = part == 0 ? h : n;
+}
 
 // int32 bias -> QACC load format: per 16-output group, two halves of 8 lanes x 20 bits
 // packed little-endian (20 bytes), each half padded to 32 bytes.
@@ -58,42 +121,84 @@ static void pack_bias(const int32_t *bias, int N, uint8_t *dst)
     }
 }
 
+typedef struct {
+    mmrt_s3_c1_t a;       // groups/bias_q cover the whole chunk
+    int8_t *y;            // output, column offset of the chunk's first group applied
+    const int8_t *x, *w;  // w: the chunk's weights (in flash or wherever they live)
+    int N, C, stride, T;
+} c1_job_t;
+
+// Part p of a chunk: its half of the output groups (all groups for p = -1), staged
+// into that core's SRAM buffer, over all frames.
+static void c1_part(void *arg, int part)
+{
+    c1_job_t *j = (c1_job_t *)arg;
+    int b, e;
+    part_range(j->a.groups, part, &b, &e);
+    if (e <= b) return;
+    const size_t group_bytes = (size_t)j->C * 16;
+    const int8_t *w = j->w + (size_t)b * group_bytes;
+    if (mmrt_s3_stage && !esp_ptr_internal(w)) {
+        int8_t *buf = part == 1 ? s_wstage1 : s_wstage0;
+        memcpy(buf, w, (size_t)(e - b) * group_bytes);
+        w = buf;
+    }
+    mmrt_s3_c1_t a = j->a;
+    a.groups = e - b;
+    if (a.bias_q) a.bias_q += (size_t)b * 64;
+    for (int t = 0; t < j->T; t++)
+        mmrt_s3_conv1x1_row(j->y + (size_t)t * j->N + b * 16, j->x + (size_t)t * j->stride * j->C, w, &a);
+}
+
 void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
                      int stride, int shift, int relu, int8_t *y, int T_out)
 {
     (void)T_in;
+    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
+    const int two = mmrt_s3_cores == 2 && s_wstage1;
     const int groups = N / 16;
     const size_t group_bytes = (size_t)C * 16;
-    int chunk = groups;  // groups per SRAM-staged chunk
-    if (mmrt_s3_stage && !esp_ptr_internal(w)) {
-        chunk = (int)(W_STAGE_BYTES / group_bytes);
-        if (chunk > groups) chunk = groups;
-    }
+    int per_buf = (int)(W_STAGE_BYTES / group_bytes);  // groups one staging buffer holds
+    int chunk = two ? 2 * per_buf : per_buf;
+    if (chunk > groups) chunk = groups;
     if (bias) pack_bias(bias, N, s_bias_q);
     for (int g0 = 0; g0 < groups; g0 += chunk) {
         int ng = groups - g0 < chunk ? groups - g0 : chunk;
-        const int8_t *wg = w + (size_t)g0 * group_bytes;
-        if (mmrt_s3_stage && !esp_ptr_internal(w)) {
-            memcpy(s_wstage, wg, (size_t)ng * group_bytes);
-            wg = s_wstage;
-        }
-        mmrt_s3_c1_t a = {bias ? s_bias_q + (size_t)g0 * 64 : NULL, C / 16 - 1, ng, shift, relu};
-        for (int t = 0; t < T_out; t++)
-            mmrt_s3_conv1x1_row(y + (size_t)t * N + g0 * 16, x + (size_t)t * stride * C, wg, &a);
+        c1_job_t job = {{bias ? s_bias_q + (size_t)g0 * 64 : NULL, C / 16 - 1, ng, shift, relu},
+                        y + g0 * 16, x, w + (size_t)g0 * group_bytes, N, C, stride, T_out};
+        if (two && ng > 1)
+            run_parts(c1_part, &job);
+        else
+            c1_part(&job, -1);
+    }
+}
+
+typedef struct {
+    const int8_t *x, *w;
+    int8_t *y;
+    int T_in, C, K, stride, pad, shift, relu, T_out;
+} dw_job_t;
+
+static void dw_part(void *arg, int part)
+{
+    dw_job_t *j = (dw_job_t *)arg;
+    mmrt_s3_dw_t a = {0, j->C, j->C / 16, j->K * 16, j->shift, j->relu};
+    int b, e;
+    part_range(j->T_out, part, &b, &e);
+    for (int t = b; t < e; t++) {
+        int start = t * j->stride - j->pad;  // input frame of tap 0
+        int k0 = start < 0 ? -start : 0;
+        int k1 = start + j->K > j->T_in ? j->T_in - start : j->K;
+        a.nk = k1 - k0;
+        mmrt_s3_dw_row(j->y + (size_t)t * j->C, j->x + (size_t)(start + k0) * j->C, j->w + k0 * 16, &a);
     }
 }
 
 void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,
                     int shift, int relu, int8_t *y, int T_out)
 {
-    mmrt_s3_dw_t a = {0, C, C / 16, K * 16, shift, relu};
-    for (int t = 0; t < T_out; t++) {
-        int start = t * stride - pad;  // input frame of tap 0
-        int k0 = start < 0 ? -start : 0;
-        int k1 = start + K > T_in ? T_in - start : K;
-        a.nk = k1 - k0;
-        mmrt_s3_dw_row(y + (size_t)t * C, x + (size_t)(start + k0) * C, w + k0 * 16, &a);
-    }
+    dw_job_t job = {x, w, y, T_in, C, K, stride, pad, shift, relu, T_out};
+    run_parts(dw_part, &job);
 }
 
 void mmrt_s3_tail(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y)

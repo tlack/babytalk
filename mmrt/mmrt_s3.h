@@ -11,6 +11,8 @@ extern "C" {
 
 // 0 = read 1x1 weights in place (e.g. from flash); 1 = stage them in internal SRAM (default).
 extern int mmrt_s3_stage;
+// 1 or 2: split conv kernels across both cores (worker task pinned to core 0).
+extern int mmrt_s3_cores;
 
 void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
                      int stride, int shift, int relu, int8_t *y, int T_out);

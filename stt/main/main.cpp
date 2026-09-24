@@ -339,6 +339,8 @@ static int ktest(Out &o)
         for (size_t i = 0; i < yn; i++)
             if (y0[i] != y1[i]) { if (first < 0) first = (int)i; bad++; }
         fails += bad > 0;
+        extern int64_t mmrt_s3_part_us[2];
+        o.printf("{\"parts_us\":[%lld,%lld]}\n", (long long)mmrt_s3_part_us[0], (long long)mmrt_s3_part_us[1]);
         double gmac = (double)c.T * c.C * c.N / (t_s3 > 0 ? t_s3 : 1) / 1000.0;
         o.printf("{\"kernel\":\"conv1x1\",\"C\":%d,\"N\":%d,\"T\":%d,\"stride\":%d,\"shift\":%d,\"relu\":%d,"
                  "\"bias\":%d,\"bad\":%d,\"first_bad\":%d,\"ref_us\":%lld,\"s3_us\":%lld,\"gmacs\":%.3f,"
@@ -443,6 +445,11 @@ static int handle(Out &o, char *line)
     if (!strcmp(argv[0], "ref")) {  // ref 1: portable C ops everywhere (A/B)
         mmrt_use_ref = a1;
         o.printf("{\"use_ref\":%d}\n", a1);
+        return 0;
+    }
+    if (!strcmp(argv[0], "cores")) {  // cores 1|2: split conv kernels across both cores
+        mmrt_s3_cores = a1;
+        o.printf("{\"cores\":%d}\n", a1);
         return 0;
     }
     if (!strcmp(argv[0], "stage")) {  // stage 0|1: SRAM-stage 1x1 weights

@@ -36,3 +36,22 @@ for sparse inputs).
 **Cheap first test:** on desktop, take one trained layer, keep its top-k
 connections per node, encode as Bloom filters at a few sizes, and measure accuracy
 vs bytes compared with int8 and int4.
+
+## On-device TTS (study, 2026-09-24)
+
+- Citrinet can't be inverted (CTC is many-to-one: prosody, pitch, speaker are discarded).
+  Reusable: mmrt kernels (conv1d/dw/1x1), CB4 int4, esp-dsp FFT (iSTFT), and the ASR as a
+  round-trip intelligibility judge for TTS training.
+- Measured on the PC (1 thread, ORT): Piper medium (VITS) 15.7M params, 71 ms CPU per s of
+  audio = 13x Citrinet (5.5 ms). On the S3 that is RTF >= ~1.3 even at Citrinet's
+  efficiency; TinyTTS (VITS-style) reports 19-32x slower than real time on ESP32.
+  Kokoro-82M: ~41 MB even at int4, doesn't fit 16 MB flash.
+- sanoTTS (arXiv 2608.21378, CC BY 4.0): eSpeak NG G2P -> duration (36k) -> acoustic
+  (200k) -> iSTFT decoder (331k); 567k params, 680 KB int8, ESP32-S3 RTF 0.22, ~289 KB
+  SRAM, ~45 MMAC per s of audio. Quality gap vs teacher (UTMOS 2.8 vs 4.4); 1.45M
+  variant UTMOS 4.1.
+- Opportunity: our 1x1 kernels sustain ~3 GMAC/s, so a student ~10-20x sanoTTS's compute
+  budget could still run faster than real time. Distill from Piper/Kokoro (datagen/),
+  int4 via int4_gptq.py-style GPTQ, judge with UTMOS + Citrinet round-trip WER.
+- Budget with STT: flash app 2 MB + STT int4 6 MB + TTS 1-4 MB + eSpeak data ~1 MB fits
+  16 MB; RAM/compute time-share (the board's audio is half-duplex anyway).

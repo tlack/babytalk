@@ -292,7 +292,7 @@ static int cmd_listen(Out &o, int secs, bool trim, bool send_audio)
     }
     int b = 0, e = n, rc = 0;
     bool speech = !trim || speech_bounds(pcm, n, &b, &e);
-    o.printf("{\"speech_ms\":%d,\"recorded_ms\":%d}\n", (e - b) / 16, n / 16);
+    o.printf("{\"speech_ms\":%d,\"recorded_ms\":%d}\n", speech ? (e - b) / 16 : 0, n / 16);
     if (!speech) {
         o.printf("{\"text\":\"\"}\n");
     } else {

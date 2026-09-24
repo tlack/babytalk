@@ -206,6 +206,14 @@ on-device transcripts, so accuracy work stays on the PC. Next levers, in order:
 QAT (int8 accuracy at int8 speed), an own row-reuse 1x1-conv kernel on both cores
 (87% of runtime; ~3× per core headroom measured), then the MoE / TTS-data work.
 
+### Status (2026-09-24): own runtime (mmrt) replaces ESP-DL
+
+`mmrt/`: exporter from ESP-PPQ's deployed graph, portable C reference ops (bit-exact vs
+the ESP-PPQ simulation on every node), PIE assembly kernels (1x1 conv, depthwise, fused
+block tail, mean) proven bit-exact on the board, two-core split. Same outputs as ESP-DL;
+**RTF 0.13 on long clips, 0.53 s model time for a 2 s command**, app 0.9 MB. Short clips
+are now bound by streaming 9.8MB of weights out of flash (~0.3 s). Details: `mmrt/README.md`.
+
 ## 4. Phases
 
 ### Phase 0 — Measure the hardware (gates everything)

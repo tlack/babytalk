@@ -112,6 +112,27 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
     }
     m->buf[h->input] = (int8_t *)input;
     m->T[h->input] = T_in;
+#ifdef MMRT_S3
+    // short inputs: stream 1x1 weights out of flash on core 0 while core 1 computes
+    mmrt_s3_stream_op_t *sops = NULL;
+    int streaming = 0;
+    if (!mmrt_use_ref) {
+        sops = (mmrt_s3_stream_op_t *)malloc(sizeof(*sops) * n_ops);
+        int ns = 0;
+        for (int i = 0; sops && i < n_ops; i++) {
+            const mmrt_op_t *op = &m->ops[i];
+            if (op->kind != MMRT_CONV1X1) continue;
+            sops[ns].w = (const int8_t *)(m->blob + op->w_off);
+            sops[ns].C = m->tensors[op->in0].channels;
+            sops[ns].N = m->tensors[op->out].channels;
+            ns++;
+        }
+        streaming = sops && mmrt_s3_stream_begin(sops, ns, T_in);
+    }
+#define STREAM_END() do { if (streaming) mmrt_s3_stream_end(); free(sops); } while (0)
+#else
+#define STREAM_END() do { } while (0)
+#endif
 
     for (int i = 0; i < n_ops; i++) {
         const mmrt_op_t *op = &m->ops[i];
@@ -125,6 +146,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                 const int T = m->T[op->in0], C = m->tensors[op->in0].channels;
                 int8_t *y = (int8_t *)alloc((size_t)T * C);
                 if (!y) {
+                    STREAM_END();
                     free(last);
                     return NULL;
                 }
@@ -154,6 +176,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
         if (op->kind == MMRT_MEAN) Ty = 1;
         int8_t *y = (int8_t *)alloc((size_t)Ty * Cy);
         if (!y) {
+            STREAM_END();
             free(last);
             return NULL;
         }
@@ -196,6 +219,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             mmrt_add_ref(x, m->buf[op->in1], Tx * Cx, op->e_a, op->e_b, op->e_out, y);
             break;
         default:
+            STREAM_END();
             free(last);
             return NULL;
         }
@@ -211,6 +235,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             }
         }
     }
+    STREAM_END();
     free(last);
     *T_out = m->T[h->output];
     return m->buf[h->output];

@@ -672,6 +672,11 @@ static int handle(Out &o, char *line)
         o.printf("{\"cores\":%d}\n", a1);
         return 0;
     }
+    if (!strcmp(argv[0], "stream")) {  // stream <max_T>: weight streaming below this input length
+        mmrt_s3_stream_max_T = a1;
+        o.printf("{\"stream_max_T\":%d}\n", a1);
+        return 0;
+    }
     if (!strcmp(argv[0], "dwfast")) {
         extern int mmrt_s3_dw_fast;
         mmrt_s3_dw_fast = a1;

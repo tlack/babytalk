@@ -92,17 +92,116 @@ static void worker(void *unused)
     }
 }
 
-static void run_parts(part_fn fn, void *arg)
+static void ensure_worker(void)
 {
-    if (mmrt_s3_cores < 2) {
-        fn(arg, -1);  // whole range
-        return;
-    }
     if (!s_go) {
         s_go = xSemaphoreCreateBinary();
         s_done = xSemaphoreCreateBinary();
         xTaskCreatePinnedToCore(worker, "mmrt_w0", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0);
     }
+}
+
+// ---------------------------------------------------------------- weight streaming
+// Short inputs: 1x1 weights must come out of flash (~310 ms per inference, flash-bus
+// bound -- two cores copy no faster than one) but compute is small. So core 0 becomes a
+// streamer that copies the upcoming 1x1 layers' weights, whole output-channel groups at a
+// time, through a ring of four 16KB SRAM slots (the same 64KB as the staging buffers),
+// while core 1 computes everything else and consumes the slots in order. Flash reads
+// then overlap compute instead of alternating with it.
+#define SLOT_BYTES (16 * 1024)
+#define NSLOT 4
+static struct {
+    const mmrt_s3_stream_op_t *ops;
+    int n_ops;
+    SemaphoreHandle_t free_slots, full_slots;
+    int8_t *slot[NSLOT];
+    struct { int op, g0, ng; } desc[NSLOT];
+    volatile int stop;
+    int consumed;       // slots taken by the consumer
+    int op_seq;         // 1x1 ops started by the consumer
+    int active;
+} S;
+
+int mmrt_s3_stream_max_T = 250;  // input frames (2.5 s); measured crossover ~2.7 s. 0 disables
+
+static int slot_groups(int C)
+{
+    int g = SLOT_BYTES / (C * 16);
+    return g < 1 ? 1 : g;
+}
+
+static void streamer(void *arg, int part)
+{
+    (void)arg;
+    (void)part;
+    int s = 0;
+    for (int i = 0; i < S.n_ops && !S.stop; i++) {
+        const mmrt_s3_stream_op_t *op = &S.ops[i];
+        const size_t gb = (size_t)op->C * 16;
+        const int groups = op->N / 16, cg = slot_groups(op->C);
+        for (int g0 = 0; g0 < groups; g0 += cg) {
+            int ng = groups - g0 < cg ? groups - g0 : cg;
+            xSemaphoreTake(S.free_slots, portMAX_DELAY);
+            if (S.stop) return;
+            int64_t t0 = esp_timer_get_time();
+            memcpy(S.slot[s], op->w + (size_t)g0 * gb, (size_t)ng * gb);
+            mmrt_s3_stage_us[0] += esp_timer_get_time() - t0;
+            S.desc[s].op = i;
+            S.desc[s].g0 = g0;
+            S.desc[s].ng = ng;
+            xSemaphoreGive(S.full_slots);
+            s = (s + 1) % NSLOT;
+        }
+    }
+}
+
+int mmrt_s3_stream_begin(const mmrt_s3_stream_op_t *ops, int n_ops, int T_in)
+{
+    if (!mmrt_s3_stage || mmrt_s3_cores < 2 || T_in > mmrt_s3_stream_max_T || n_ops == 0) return 0;
+    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
+    if (!s_wstage1) return 0;
+    for (int i = 0; i < n_ops; i++)
+        if (ops[i].C * 16 > SLOT_BYTES || ops[i].N % 16) return 0;
+    ensure_worker();
+    if (!S.free_slots) {
+        S.free_slots = xSemaphoreCreateCounting(NSLOT, NSLOT);
+        S.full_slots = xSemaphoreCreateCounting(NSLOT, 0);
+    }
+    S.slot[0] = s_wstage0;
+    S.slot[1] = s_wstage0 + SLOT_BYTES;
+    S.slot[2] = s_wstage1;
+    S.slot[3] = s_wstage1 + SLOT_BYTES;
+    S.ops = ops;
+    S.n_ops = n_ops;
+    S.stop = 0;
+    S.consumed = 0;
+    S.op_seq = 0;
+    S.active = 1;
+    s_fn = streamer;
+    s_arg = NULL;
+    xSemaphoreGive(s_go);  // the worker runs the streamer until the list is done
+    return 1;
+}
+
+void mmrt_s3_stream_end(void)
+{
+    if (!S.active) return;
+    S.stop = 1;
+    for (int i = 0; i < NSLOT; i++) xSemaphoreGive(S.free_slots);  // unblock the streamer
+    xSemaphoreTake(s_done, portMAX_DELAY);
+    while (xSemaphoreTake(S.full_slots, 0) == pdTRUE) {}      // reset both counts
+    while (xSemaphoreTake(S.free_slots, 0) == pdTRUE) {}
+    for (int i = 0; i < NSLOT; i++) xSemaphoreGive(S.free_slots);
+    S.active = 0;
+}
+
+static void run_parts(part_fn fn, void *arg)
+{
+    if (mmrt_s3_cores < 2 || S.active) {  // streaming: core 0 is busy copying weights
+        fn(arg, -1);  // whole range
+        return;
+    }
+    ensure_worker();
     s_fn = fn;
     s_arg = arg;
     xSemaphoreGive(s_go);
@@ -170,6 +269,26 @@ void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const in
                      int stride, int shift, int relu, int8_t *y, int T_out)
 {
     (void)T_in;
+    if (S.active) {  // consume this layer's weights from the streamer's slots, in order
+        const int groups = N / 16;
+        if (bias) pack_bias(bias, N, s_bias_q);
+        for (int g0 = 0; g0 < groups;) {
+            xSemaphoreTake(S.full_slots, portMAX_DELAY);
+            int si = S.consumed % NSLOT;
+            int ng = S.desc[si].ng;
+            if (S.desc[si].op != S.op_seq || S.desc[si].g0 != g0) abort();  // executor/streamer out of step
+            int64_t t0 = esp_timer_get_time();
+            mmrt_s3_c1_t a = {bias ? s_bias_q + (size_t)g0 * 64 : NULL, C / 16 - 1, ng, shift, relu};
+            for (int t = 0; t < T_out; t++)
+                mmrt_s3_conv1x1_row(y + (size_t)t * N + g0 * 16, x + (size_t)t * stride * C, S.slot[si], &a);
+            mmrt_s3_c1_us[1] += esp_timer_get_time() - t0;
+            S.consumed++;
+            xSemaphoreGive(S.free_slots);
+            g0 += ng;
+        }
+        S.op_seq++;
+        return;
+    }
     if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
     const int two = mmrt_s3_cores == 2 && s_wstage1;
     const int groups = N / 16;

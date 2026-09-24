@@ -28,6 +28,17 @@ void mmrt_s3_tail(const int8_t *a, const int8_t *s, const int8_t *r, int T, int 
 // Same as mmrt_mean_ref; column sums in QACC (T * 128 must stay below 2^19).
 void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y);
 
+// Weight streaming for short inputs (see mmrt_s3.c): the executor lists its 1x1 ops in
+// execution order and brackets the run with begin/end; begin returns 0 when streaming
+// isn't used (long input, one core, ...), and the kernels then run as usual.
+typedef struct {
+    const int8_t *w;
+    int C, N;
+} mmrt_s3_stream_op_t;
+extern int mmrt_s3_stream_max_T;  // input frames; 0 disables
+int mmrt_s3_stream_begin(const mmrt_s3_stream_op_t *ops, int n_ops, int T_in);
+void mmrt_s3_stream_end(void);
+
 #ifdef __cplusplus
 }
 #endif

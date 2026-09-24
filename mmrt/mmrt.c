@@ -50,17 +50,22 @@ size_t mmrt_cache_weights(mmrt_model_t *m, size_t budget, mmrt_alloc_fn alloc, m
     if (!budget) return 0;
     m->wcache = (const int8_t **)calloc(n, sizeof(*m->wcache));
     if (!m->wcache) return 0;
-    for (uint32_t i = 0; i < n; i++) {
-        const mmrt_op_t *op = &m->ops[i];
-        if (op->kind != MMRT_CONV1X1) continue;
-        size_t bytes = (size_t)m->tensors[op->in0].channels * m->tensors[op->out].channels;
-        if (m->wcache_bytes + bytes > budget) break;
-        int8_t *c = (int8_t *)alloc(bytes);
-        if (!c) break;
-        memcpy(c, m->blob + op->w_off, bytes);
-        m->wcache[i] = c;
-        m->wcache_bytes += bytes;
-    }
+    // depthwise weights first: small (C*K per op, ~120KB in all for Citrinet-256) and read
+    // straight from the image for every frame, so while 1x1 weights stream out of flash
+    // they compete for the same bus; then 1x1 weights in op order
+    for (int pass = 0; pass < 2; pass++)
+        for (uint32_t i = 0; i < n; i++) {
+            const mmrt_op_t *op = &m->ops[i];
+            if (op->kind != (pass ? MMRT_CONV1X1 : MMRT_DWCONV)) continue;
+            size_t bytes = (size_t)m->tensors[op->in0].channels * (pass ? m->tensors[op->out].channels : op->K);
+            if (m->wcache_bytes + bytes > budget) goto done;
+            int8_t *c = (int8_t *)alloc(bytes);
+            if (!c) goto done;
+            memcpy(c, m->blob + op->w_off, bytes);
+            m->wcache[i] = c;
+            m->wcache_bytes += bytes;
+        }
+done:
     return m->wcache_bytes;
 }
 
@@ -217,7 +222,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                 return NULL;
             }
             const int32_t *b = pw->b_off != 0xffffffffu ? (const int32_t *)(m->blob + pw->b_off) : NULL;
-            if (mmrt_s3_dw_pw(m->buf[op->in0], Tx, Cx, (const int8_t *)(m->blob + op->w_off), op->K, op->stride,
+            if (mmrt_s3_dw_pw(m->buf[op->in0], Tx, Cx, op_weights(m, i), op->K, op->stride,
                               op->pad, op->shift, op->relu, op_weights(m, i + 1), b, N, pw->shift,
                               pw->relu, y, T)) {
                 m->buf[pw->out] = y;
@@ -244,7 +249,8 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             free(last);
             return NULL;
         }
-        const int8_t *w = op->kind == MMRT_CONV1X1 ? op_weights(m, i) : (const int8_t *)(m->blob + op->w_off);
+        const int8_t *w = op->kind == MMRT_CONV1X1 || op->kind == MMRT_DWCONV ? op_weights(m, i)
+                                                                              : (const int8_t *)(m->blob + op->w_off);
         switch (op->kind) {
         case MMRT_DWCONV:
 #ifdef MMRT_S3

@@ -14,6 +14,15 @@ extern int mmrt_s3_stage;
 // 1 or 2: split conv kernels across both cores (worker task pinned to core 0).
 extern int mmrt_s3_cores;
 
+// Allocate the second SRAM staging buffer (32KB internal) and start the core-0 worker.
+// Call once at startup, before the app takes internal RAM for other things: done lazily
+// otherwise, and if that allocation fails later, 1x1 convs quietly run on one core.
+// Returns 0 when both are ready.
+int mmrt_s3_init(void);
+
+// Diagnostic: cycles per VSMULAS (16 MACs) of the 1x1 row kernel on the calling core.
+float mmrt_s3_c1_bench(int groups, int C, int frames, int where);
+
 void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
                      int stride, int shift, int relu, int8_t *y, int T_out);
 

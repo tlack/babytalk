@@ -93,17 +93,37 @@ struct Out {
 static void *psram_alloc(size_t n) { return heap_caps_aligned_alloc(16, n ? n : 1, MALLOC_CAP_SPIRAM); }
 static void psram_free(void *p) { heap_caps_free(p); }
 
+// Model activations: small tensors in internal SRAM (short inputs: late, downsampled
+// layers), keeping a reserve free for WiFi/lwIP; everything else in PSRAM. `actsram`.
+static size_t g_act_sram_max = 32 * 1024, g_act_sram_reserve = 40 * 1024;
+// (internal_min_free understates the true low: it sums each heap region's own minimum,
+// reached at different times as activations move between regions.)
+static size_t g_act_low = SIZE_MAX;  // lowest internal free right after an activation allocation
+#ifndef STT_WEIGHT_CACHE_KB
+#define STT_WEIGHT_CACHE_KB 6144
+#endif
+static void *act_alloc(size_t n)
+{
+    if (n && n <= g_act_sram_max && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= n + g_act_sram_reserve) {
+        void *p = heap_caps_aligned_alloc(16, n, MALLOC_CAP_INTERNAL);
+        size_t f = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        if (f < g_act_low) g_act_low = f;
+        if (p) return p;
+    }
+    return psram_alloc(n);
+}
+
 static void heap_line(Out &o, const char *when)
 {
     o.printf("{\"when\":\"%s\",\"internal_free\":%u,\"psram_free\":%u,\"internal_largest\":%u,"
-             "\"internal_total\":%u,\"psram_total\":%u,\"internal_min_free\":%u,\"psram_min_free\":%u}\n", when,
+             "\"internal_total\":%u,\"psram_total\":%u,\"internal_min_free\":%u,\"psram_min_free\":%u,\"act_low\":%d}\n", when,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), g_act_low == SIZE_MAX ? -1 : (int)g_act_low);
 }
 
 static int load_model(Out &o)
@@ -124,6 +144,10 @@ static int load_model(Out &o)
         return 1;
     }
     g_loaded = true;
+    mmrt_s3_init();
+    // Weights resident in PSRAM (88 MB/s vs 32 MB/s mapped flash): 1 s of audio 374 -> 282
+    // ms, 10 s 1187 -> 1041 ms. Leaves ~2 MB PSRAM: enough for 10 s windows. `cache <KB>`.
+    mmrt_cache_weights(&g_model, STT_WEIGHT_CACHE_KB * 1024, psram_alloc, psram_free);
     const mmrt_header_t *hd = g_model.hdr;
     o.printf("{\"load_ms\":%.1f,\"ops\":%u,\"tensors\":%u,\"blob_mb\":%.2f,\"in_ch\":%u,\"in_exp\":%d,"
              "\"out_ch\":%u,\"out_valid\":%u}\n",
@@ -178,7 +202,7 @@ static int infer(Out &o, const int8_t *x, int T, double fe_ms, int n_samples, bo
     int T_out = 0;
     int64_t t0 = esp_timer_get_time();
     g_last_us = t0;
-    const int8_t *y = mmrt_run(&g_model, x, T, &T_out, psram_alloc, psram_free);
+    const int8_t *y = mmrt_run(&g_model, x, T, &T_out, act_alloc, psram_free);
     int64_t run_us = esp_timer_get_time() - t0;
     mmrt_trace = NULL;
     if (!y) {
@@ -234,7 +258,7 @@ static const int8_t *run_pcm(const int16_t *pcm, int n, int *T_out, char *text, 
         stt_features(pcm, n, feats, scratch);
         stt_fill_quant(feats, T, q16, T, g_model.tensors[g_model.hdr->input].exp);
         for (int i = 0; i < T * MEL_N; i++) q8[i] = q16[i] > 127 ? 127 : (q16[i] < -128 ? -128 : q16[i]);
-        y = mmrt_run(&g_model, q8, T, T_out, psram_alloc, psram_free);
+        y = mmrt_run(&g_model, q8, T, T_out, act_alloc, psram_free);
     }
     psram_free(feats);
     heap_caps_free(scratch);
@@ -700,6 +724,12 @@ static int handle(Out &o, char *line)
                  (esp_timer_get_time() - t0) / 1000.0, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         return 0;
     }
+    if (!strcmp(argv[0], "actsram")) {  // actsram <maxKB> [reserveKB]: activations up to this size in SRAM
+        g_act_sram_max = (size_t)a1 * 1024;
+        if (argc > 2) g_act_sram_reserve = (size_t)atoi(argv[2]) * 1024;
+        o.printf("{\"act_sram_max_kb\":%d,\"reserve_kb\":%u}\n", a1, (unsigned)(g_act_sram_reserve / 1024));
+        return 0;
+    }
     if (!strcmp(argv[0], "fuse")) {  // fuse 0|1: depthwise -> 1x1 fusion
         mmrt_s3_fuse = a1;
         o.printf("{\"fuse\":%d}\n", a1);
@@ -751,6 +781,13 @@ static int handle(Out &o, char *line)
                      mmrt_s3_cores, (long long)us, (double)T * C * K / us / 1000.0);
         }
         psram_free(w); psram_free(y); psram_free(xp); heap_caps_free(xs);
+        return 0;
+    }
+    if (!strcmp(argv[0], "c1bench")) {  // c1bench: 1x1 kernel cycles per VSMULAS, SRAM/PSRAM operands
+        for (int where = 0; where < 4; where++)
+            for (int g = 1; g <= 8; g *= 8)
+                o.printf("{\"groups\":%d,\"C\":256,\"x\":\"%s\",\"w\":\"%s\",\"cyc_per_vsmulas\":%.3f}\n", g,
+                         where & 1 ? "psram" : "sram", where & 2 ? "psram" : "sram", mmrt_s3_c1_bench(g, 256, 64, where));
         return 0;
     }
     if (!strcmp(argv[0], "dwstress")) {  // dwstress <K> <iters> [x_sram y_sram xoff yoff gap]: 2-core dw vs 1-core, bit-exact?

@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "esp_memory_utils.h"
 #include "esp_heap_caps.h"
+#include "esp_cpu.h"
 
 typedef struct {
     const uint8_t *bias_q;
@@ -48,7 +49,7 @@ void mmrt_s3_colsum16(const int8_t *x, int T, int C, uint8_t *qacc_out);
 // SRAM bank stall each other (measured: 1.17x -> 1.51x dual-core speedup when split).
 #define W_STAGE_BYTES (32 * 1024)
 static DRAM_ATTR int8_t s_wstage0[W_STAGE_BYTES] __attribute__((aligned(16)));
-static int8_t *s_wstage1;  // heap, allocated on first use
+static int8_t *s_wstage1;  // heap: mmrt_s3_init(), else on first use
 static DRAM_ATTR uint8_t s_bias_q[64 * 48] __attribute__((aligned(16)));  // up to 768 outputs
 
 int mmrt_s3_stage = 1;
@@ -92,6 +93,13 @@ static void ensure_worker(void)
         s_done = xSemaphoreCreateBinary();
         xTaskCreatePinnedToCore(worker, "mmrt_w0", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0);
     }
+}
+
+int mmrt_s3_init(void)
+{
+    if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
+    ensure_worker();
+    return s_wstage1 && s_go ? 0 : -1;
 }
 
 // ---------------------------------------------------------------- weight streaming
@@ -445,4 +453,30 @@ void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y)
             y[g * 16 + i] = v > 127 ? 127 : (v < -128 ? -128 : (int8_t)v);
         }
     }
+}
+
+// ---------------------------------------------------------------- kernel microbenchmark
+// CPU cycles per VSMULAS (16 MACs) of the 1x1 row kernel on this core: groups x C
+// weights and `frames` input rows, each either in internal SRAM or PSRAM (bit 0: x in
+// PSRAM, bit 1: w in PSRAM). The ideal is 1.0.
+float mmrt_s3_c1_bench(int groups, int C, int frames, int where)
+{
+    int8_t *x = heap_caps_aligned_alloc(16, (size_t)frames * C, (where & 1) ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+    int8_t *w = heap_caps_aligned_alloc(16, (size_t)groups * C * 16, (where & 2) ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+    int8_t *y = heap_caps_aligned_alloc(16, (size_t)groups * 16, MALLOC_CAP_INTERNAL);
+    float r = -1;
+    if (x && w && y) {
+        memset(x, 3, (size_t)frames * C);
+        memset(w, 5, (size_t)groups * C * 16);
+        mmrt_s3_c1_t a = {NULL, C / 16 - 1, groups, 8, 0};
+        mmrt_s3_conv1x1_row(y, x, w, &a);  // warm up
+        uint32_t c0 = esp_cpu_get_cycle_count();
+        for (int t = 0; t < frames; t++) mmrt_s3_conv1x1_row(y, x + (size_t)t * C, w, &a);
+        uint32_t c1 = esp_cpu_get_cycle_count();
+        r = (float)(c1 - c0) / ((float)frames * groups * C);
+    }
+    heap_caps_free(x);
+    heap_caps_free(w);
+    heap_caps_free(y);
+    return r;
 }

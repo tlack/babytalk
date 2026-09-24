@@ -90,7 +90,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
 
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release);
 
-// Optional: copy 1x1-conv weights (in op order) into memory from `alloc` until `budget`
+// Optional: copy depthwise, then 1x1-conv weights (in op order) into memory from `alloc` until `budget`
 // bytes are used, e.g. PSRAM (~88 MB/s) when the image is in flash (~32 MB/s): every
 // inference reads all weights once, so each cached MB saves ~20 ms per run on the S3 --
 // at the cost of that much PSRAM. budget 0 releases the cache. Returns bytes cached.

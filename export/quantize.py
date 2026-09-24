@@ -73,11 +73,21 @@ def main():
     ap.add_argument("--every", type=int, default=4, help="eval on every Nth test-clean utterance")
     ap.add_argument("--no-eval", action="store_true")
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--eq", action="store_true", help="layerwise equalization")
+    ap.add_argument("--bc", action="store_true", help="bias correction")
+    ap.add_argument("--algo", default=None, help="activation calib algorithm (default kl): kl|percentile|mse|minmax")
+    ap.add_argument("--int16-re", default=None, help="regex: extra ops (by name) dispatched to int16")
+    ap.add_argument("--report", action="store_true", help="print PPQ graphwise error (SNR) per op")
+    ap.add_argument("--qtype", default=None, help="ESP-PPQ quant_type override, e.g. w8a16")
+    ap.add_argument("--src", default=str(MODELS / "citrinet256_static1600.onnx"))
+    ap.add_argument("--tag", default=None)
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
 
-    tag = "int16" if a.int16 else ("int8_mixed16" if a.mixed else "int8")
-    src = MODELS / "citrinet256_static1600.onnx"
+    tag = a.tag or ("int16" if a.int16 else ("int8_mixed16" if a.mixed else "int8"))
+    from pathlib import Path
+
+    src = Path(a.src)
     work = MODELS / "ppq"
     work.mkdir(parents=True, exist_ok=True)
     onnx_in = work / f"citrinet256_static1600_{tag}.onnx"  # ESP-PPQ simplifies this file in place
@@ -89,19 +99,41 @@ def main():
     calib = calib_windows(feat, a.calib)
     print(f"calibration: {len(calib)} dev-clean windows ({time.time() - t0:.0f}s)")
 
-    setting = QuantizationSettingFactory.espdl_setting(num_of_bits=16 if a.int16 else 8)
+    setting = QuantizationSettingFactory.espdl_setting(num_of_bits=16 if (a.int16 or a.qtype == "w8a16") else 8)
     if a.mixed:
         for op in ["/blocks/blocks.0/convs.0/convs.0.0/Conv", "/blocks/blocks.0/convs.0/convs.0.1/Conv",
                    "/decoder/Conv"]:
             setting.dispatching_table.append(op, get_target_platform("esp32s3", 16))
+    if a.int16_re:
+        import re
+
+        import onnx
+
+        for n in onnx.load(str(src)).graph.node:
+            if re.search(a.int16_re, n.name):
+                setting.dispatching_table.append(n.name, get_target_platform("esp32s3", 16))
+    if a.eq:
+        setting.equalization = True
+        setting.equalization_setting.opt_level = 2
+        setting.equalization_setting.iterations = 10
+        setting.equalization_setting.value_threshold = 0.5
+    if a.bc:
+        setting.bias_correct = True
+    if a.algo:
+        setting.quantize_activation_setting.calib_algorithm = a.algo
 
     t0 = time.time()
     graph = espdl_quantize_onnx(
         onnx_import_file=str(onnx_in), espdl_export_file=str(espdl), calib_dataloader=calib,
         calib_steps=len(calib), input_shape=[1, 80, WIN], target="esp32s3", num_of_bits=16 if a.int16 else 8,
-        setting=setting, device="cpu", error_report=False, export_test_values=False, verbose=0,
+        setting=setting, device="cpu", **({"quant_type": a.qtype} if a.qtype else {}), error_report=False, export_test_values=False, verbose=0,
     )
     qsecs = time.time() - t0
+    if a.report:
+        from esp_ppq.quantization.analyse import graphwise_error_analyse
+
+        graphwise_error_analyse(graph=graph, running_device="cpu", dataloader=calib[:16],
+                                collate_fn=lambda x: x, steps=16)
     scale, exp = input_exponent(graph)
     print(f"quantized+exported in {qsecs:.0f}s -> {espdl} ({espdl.stat().st_size / 1e6:.2f} MB)")
     print(f"input 'feats' scale {scale} exponent {exp}")
@@ -117,7 +149,7 @@ def main():
             if typ in ("Conv", "Gemm") and None not in ie[:2] and oe[0] is not None and oe[0] - ie[0] - ie[1] < 0:
                 bad.append((name, ie, oe))
     print("ops violating out_exp >= in_exp + w_exp:", bad)
-    summ = dict(tag=tag, exponent_violations=[b[0] for b in bad], espdl=str(espdl), espdl_bytes=espdl.stat().st_size, input_scale=scale,
+    summ = dict(tag=tag, args=vars(a), exponent_violations=[b[0] for b in bad], espdl=str(espdl), espdl_bytes=espdl.stat().st_size, input_scale=scale,
                 input_exponent=exp, calib=len(calib), platforms=plat)
 
     if not a.no_eval:

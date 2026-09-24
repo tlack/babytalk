@@ -89,9 +89,27 @@ class StaticCitrinet(nn.Module):
         return self.decoder(self.blocks(feats))
 
 
-def build(win=1600, prune_dead_se=True):
+@torch.no_grad()
+def equalize_dw_pw(sm: "StaticCitrinet", alpha: float = 0.5):
+    """Cross-layer equalization of every depthwise->pointwise pair (no nonlinearity between,
+    dw has no bias, so this is exact): dw channel c *= s_c, pw input column c /= s_c with
+    s_c = (r_pw_c / r_dw_c)^alpha. Evens out per-channel weight ranges, which matters because
+    ESP-DL on the S3 quantizes weights per-tensor (per-channel is P4-only)."""
+    for blk in sm.blocks:
+        for seq in blk.convs:
+            dw, pw = seq[0], seq[1]
+            r1 = dw.weight.abs().amax(dim=(1, 2)).clamp_min(1e-8)  # [C]
+            r2 = pw.weight.abs().amax(dim=(0, 2)).clamp_min(1e-8)  # [C]
+            sc = (r2 / r1) ** alpha
+            dw.weight.mul_(sc[:, None, None])
+            pw.weight.div_(sc[None, :, None])
+
+
+def build(win=1600, prune_dead_se=True, cle=False):
     m, feat, vocab, cfg = load_model()
     sm = StaticCitrinet(fold_bn(m), prune_dead_se).eval()
+    if cle:
+        equalize_dw_pw(sm)
     print("dead SE pruned in blocks:", [i for i, b in enumerate(sm.blocks) if isinstance(b.se, nn.Identity)])
     # equivalence with the reference (unfolded, unmasked) model on random input
     x = torch.randn(1, 80, win)
@@ -104,9 +122,10 @@ def build(win=1600, prune_dead_se=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--win", type=int, default=1600)
+    ap.add_argument("--cle", action="store_true", help="equalize dw->pw weight ranges (exact rewrite)")
     a = ap.parse_args()
-    sm, m, feat, vocab = build(a.win)
-    out = DATA / "models" / f"citrinet256_static{a.win}.onnx"
+    sm, m, feat, vocab = build(a.win, cle=a.cle)
+    out = DATA / "models" / f"citrinet256_static{a.win}{'_cle' if a.cle else ''}.onnx"
     x = torch.randn(1, 80, a.win)
     torch.onnx.export(sm, (x,), str(out), opset_version=18, input_names=["feats"], output_names=["logits"],
                       dynamo=False, do_constant_folding=True)

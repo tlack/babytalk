@@ -44,6 +44,12 @@ void mmrt_wload(int8_t *dst, const int8_t *w, int wfmt, int C, int g0, int ng)
         memcpy(dst, src, (size_t)ng * gb);
         return;
     }
+#ifdef MMRT_S3
+    if (!mmrt_use_ref) {
+        for (int g = 0; g < ng; g++, src += gb, dst += (size_t)C * 16) mmrt_s3_cb4_group(dst, src, C);
+        return;
+    }
+#endif
     for (int g = 0; g < ng; g++, src += gb) {
         int8_t tab[256];  // [lane][level], local: the source may be slow memory
         memcpy(tab, src, 256);

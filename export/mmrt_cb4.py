@@ -4,7 +4,7 @@ check that decoding gives back exactly the same int8 weights.
 
   uv run mmrt_cb4.py data/models/mmrt/citrinet256_cb4_gptq16.mmrt [-o out.mmrt]
 
-Ops pack only where it saves bytes (256 + 8*C < 16*C, i.e. C > 32); the rest stay int8.
+Ops pack where every channel has <= 16 levels and it saves bytes (C > 32); the rest stay int8.
 """
 import argparse
 import struct
@@ -69,8 +69,9 @@ def main():
         if w_off != 0xFFFFFFFF:
             size = {1: C * K, 2: C * N, 4: 256}[kind]
             data = blob[w_off: w_off + size]
-            if kind == 2 and 256 + 8 * C < 16 * C:
-                w = np.frombuffer(data, np.int8).reshape(N // 16, C, 16)
+            w = np.frombuffer(data, np.int8).reshape(-1, C, 16) if kind == 2 else None
+            fits = kind == 2 and all(len(np.unique(w[g, :, l])) <= 16 for g in range(N // 16) for l in range(16))
+            if fits and 256 + 8 * C < 16 * C:  # layers with more levels (kept int8) stay int8
                 data = b"".join(pack_group(w[g]) for g in range(N // 16))
                 dec = np.stack([unpack_group(data[g * (256 + 8 * C):], C) for g in range(N // 16)])
                 assert np.array_equal(dec, w), f"op {i}: decode mismatch"

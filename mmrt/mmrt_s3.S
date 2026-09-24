@@ -247,3 +247,89 @@ mmrt_s3_colsum16:
     retw
     .size   mmrt_s3_colsum16, .-mmrt_s3_colsum16
 
+// void mmrt_s3_cb4_rows(int8_t *dst, const uint8_t *idx, const uint32_t *tab32, int C)
+//
+// CB4 decode (mmrt.h) of one output group: C rows of 8 index bytes -> C rows of 16 int8.
+// tab32[lane][level] = (uint8_t)level_value << (8 * (lane % 4)) (built by the C driver),
+// so each weight is extract nibble, address, load, OR into its output word: ~4.3
+// instructions per weight (the portable C decode: ~9.3 cycles). dst, idx 4-byte aligned.
+    .align 4
+    .global mmrt_s3_cb4_rows
+    .type   mmrt_s3_cb4_rows, @function
+mmrt_s3_cb4_rows:
+    entry   a1, 32
+    beqz    a5, .Lcb4_done
+.Lcb4_row:
+    l32i    a6, a3, 0           // index nibbles of lanes 0..7
+    extui   a7, a6, 0, 4
+    addx4   a7, a7, a4
+    extui   a9, a6, 4, 4
+    addx4   a9, a9, a4
+    extui   a11, a6, 8, 4
+    addx4   a11, a11, a4
+    extui   a13, a6, 12, 4
+    addx4   a13, a13, a4
+    l32i    a8, a7, 0
+    l32i    a10, a9, 64
+    l32i    a12, a11, 128
+    l32i    a14, a13, 192
+    or      a8, a8, a10
+    or      a12, a12, a14
+    or      a8, a8, a12
+    s32i    a8, a2, 0
+    extui   a7, a6, 16, 4
+    addx4   a7, a7, a4
+    extui   a9, a6, 20, 4
+    addx4   a9, a9, a4
+    extui   a11, a6, 24, 4
+    addx4   a11, a11, a4
+    extui   a13, a6, 28, 4
+    addx4   a13, a13, a4
+    l32i    a8, a7, 256
+    l32i    a10, a9, 320
+    l32i    a12, a11, 384
+    l32i    a14, a13, 448
+    or      a8, a8, a10
+    or      a12, a12, a14
+    or      a8, a8, a12
+    s32i    a8, a2, 4
+    l32i    a6, a3, 4           // index nibbles of lanes 8..15
+    extui   a7, a6, 0, 4
+    addx4   a7, a7, a4
+    extui   a9, a6, 4, 4
+    addx4   a9, a9, a4
+    extui   a11, a6, 8, 4
+    addx4   a11, a11, a4
+    extui   a13, a6, 12, 4
+    addx4   a13, a13, a4
+    l32i    a8, a7, 512
+    l32i    a10, a9, 576
+    l32i    a12, a11, 640
+    l32i    a14, a13, 704
+    or      a8, a8, a10
+    or      a12, a12, a14
+    or      a8, a8, a12
+    s32i    a8, a2, 8
+    extui   a7, a6, 16, 4
+    addx4   a7, a7, a4
+    extui   a9, a6, 20, 4
+    addx4   a9, a9, a4
+    extui   a11, a6, 24, 4
+    addx4   a11, a11, a4
+    extui   a13, a6, 28, 4
+    addx4   a13, a13, a4
+    l32i    a8, a7, 768
+    l32i    a10, a9, 832
+    l32i    a12, a11, 896
+    l32i    a14, a13, 960
+    or      a8, a8, a10
+    or      a12, a12, a14
+    or      a8, a8, a12
+    s32i    a8, a2, 12
+    addi    a3, a3, 8
+    addi    a2, a2, 16
+    addi    a5, a5, -1
+    bnez    a5, .Lcb4_row
+.Lcb4_done:
+    retw
+    .size   mmrt_s3_cb4_rows, .-mmrt_s3_cb4_rows

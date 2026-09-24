@@ -790,6 +790,14 @@ static int handle(Out &o, char *line)
                          where & 1 ? "psram" : "sram", where & 2 ? "psram" : "sram", mmrt_s3_c1_bench(g, 256, 64, where));
         return 0;
     }
+    if (!strcmp(argv[0], "cb4bench")) {  // cb4bench: CB4 decode cycles per weight
+        for (int C = 32; C <= 640; C *= 2) {
+            float ca = 0, cr = 0;
+            int bad = mmrt_s3_cb4_bench(C, &ca, &cr);
+            o.printf("{\"C\":%d,\"bad\":%d,\"asm_cyc_per_w\":%.2f,\"c_cyc_per_w\":%.2f}\n", C, bad, ca, cr);
+        }
+        return 0;
+    }
     if (!strcmp(argv[0], "dwstress")) {  // dwstress <K> <iters> [x_sram y_sram xoff yoff gap]: 2-core dw vs 1-core, bit-exact?
         const int C = 256, K = a1 > 0 ? a1 : 15, T = 160, pad = K / 2, iters = argc > 2 ? atoi(argv[2]) : 100;
         const bool xs = argc > 3 && atoi(argv[3]), ys = argc > 4 && atoi(argv[4]);

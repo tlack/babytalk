@@ -456,6 +456,17 @@ void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y)
     }
 }
 
+// ---------------------------------------------------------------- CB4 decode
+void mmrt_s3_cb4_rows(int8_t *dst, const uint8_t *idx, const uint32_t *tab32, int C);
+
+// One CB4 group (256-byte table + C*8 index bytes) -> [C][16] int8, via the asm row decoder.
+void mmrt_s3_cb4_group(int8_t *dst, const uint8_t *src, int C)
+{
+    uint32_t tab32[256];  // [lane][level], each value pre-shifted to its byte of the output word
+    for (int i = 0; i < 256; i++) tab32[i] = (uint32_t)src[i] << (8 * ((i >> 4) & 3));
+    mmrt_s3_cb4_rows(dst, src + 256, tab32, C);
+}
+
 // ---------------------------------------------------------------- kernel microbenchmark
 // CPU cycles per VSMULAS (16 MACs) of the 1x1 row kernel on this core: groups x C
 // weights and `frames` input rows, each either in internal SRAM or PSRAM (bit 0: x in
@@ -480,4 +491,36 @@ float mmrt_s3_c1_bench(int groups, int C, int frames, int where)
     heap_caps_free(w);
     heap_caps_free(y);
     return r;
+}
+
+// CB4 decode check + speed, SRAM to SRAM (4 groups, C inputs): cycles per weight of the
+// asm decoder (*asm) and the portable C one (*ref); returns the number of differing bytes.
+int mmrt_s3_cb4_bench(int C, float *asm_cyc, float *ref_cyc)
+{
+    const size_t gb = mmrt_wgroup_bytes(C, MMRT_W_CB4), n = (size_t)C * 16 * 4;
+    uint8_t *src = heap_caps_aligned_alloc(16, gb * 4, MALLOC_CAP_INTERNAL);
+    int8_t *d0 = heap_caps_aligned_alloc(16, n, MALLOC_CAP_INTERNAL);
+    int8_t *d1 = heap_caps_aligned_alloc(16, n, MALLOC_CAP_INTERNAL);
+    int bad = -1;
+    if (src && d0 && d1) {
+        for (size_t i = 0; i < gb * 4; i++) src[i] = (uint8_t)(i * 37 + (i >> 7) * 11);
+        extern int mmrt_use_ref;
+        int save = mmrt_use_ref;
+        mmrt_use_ref = 0;
+        mmrt_wload(d0, (const int8_t *)src, MMRT_W_CB4, C, 0, 1);  // warm
+        uint32_t c0 = esp_cpu_get_cycle_count();
+        mmrt_wload(d0, (const int8_t *)src, MMRT_W_CB4, C, 0, 4);
+        *asm_cyc = (float)(esp_cpu_get_cycle_count() - c0) / n;
+        mmrt_use_ref = 1;
+        c0 = esp_cpu_get_cycle_count();
+        mmrt_wload(d1, (const int8_t *)src, MMRT_W_CB4, C, 0, 4);
+        *ref_cyc = (float)(esp_cpu_get_cycle_count() - c0) / n;
+        mmrt_use_ref = save;
+        bad = 0;
+        for (size_t i = 0; i < n; i++) bad += d0[i] != d1[i];
+    }
+    heap_caps_free(src);
+    heap_caps_free(d0);
+    heap_caps_free(d1);
+    return bad;
 }

@@ -22,6 +22,10 @@ int mmrt_s3_init(void);
 
 // Diagnostic: cycles per VSMULAS (16 MACs) of the 1x1 row kernel on the calling core.
 float mmrt_s3_c1_bench(int groups, int C, int frames, int where);
+// One CB4 weight group (mmrt.h) -> [C][16] int8; mmrt_wload uses it on the S3.
+void mmrt_s3_cb4_group(int8_t *dst, const uint8_t *src, int C);
+// Diagnostic: CB4 decode, asm vs portable C: differing bytes, cycles per weight of each.
+int mmrt_s3_cb4_bench(int C, float *asm_cyc, float *ref_cyc);
 
 // w: in format wfmt (mmrt_wfmt_t); staged/decoded into SRAM as int8.
 void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, int wfmt, const int32_t *bias, int N,

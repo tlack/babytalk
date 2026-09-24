@@ -78,6 +78,28 @@ Why SRAM activations help short inputs: the streamer's flash reads go through th
 (depthwise at 1 s: 93 -> 37 ms). `internal_min_free` understates the low point here: it
 sums each heap region's own minimum, reached at different times.
 
+### 4-bit weights (CB4)
+
+`mmrt.h` weight format per op: INT8 or CB4 (per 16-output group a 16-level int8 table per
+channel + 4-bit indices), decoded to int8 wherever weights are staged, so kernels and
+bit-exactness are unchanged. Model: GPTQ (act-order, bias correction) against each
+channel's codebook, first 1x1 and decoder kept int8 (`export/int4_gptq.py --keep-io`,
+packed by `export/mmrt_cb4.py`): **5.99 MB instead of 9.78 MB**, WER 8.21 vs 6.28 int8 on
+test-clean (see `export/RESULTS.md`). Board output bit-exact with the host.
+
+Decode in assembly (`mmrt_s3_cb4_rows`: per group a 1KB table of pre-shifted 32-bit
+values, then extract / addx4 / load / OR per weight): 5.2 cycles per weight vs 9.3 for C.
+
+| model time, ms | 1 s | 2 s | 4 s | 10 s |
+|---|---|---|---|---|
+| int8, 6MB PSRAM cache | 245 | 357 | 516 | 1015 |
+| int8, no cache | 374 | 498 | 675 | 1187 |
+| **int4, packed model cached (6MB)** | **241** | **325** | **512** | **998** |
+| **int4, no cache** | **268** | **363** | **558** | **1071** |
+
+Without a cache (PSRAM kept for the app, e.g. MicroPython), int4 is ~30% faster than
+int8; half the bytes cross the flash bus.
+
 ### A dual-core race that was a kernel, not a race
 
 A frame-loop depthwise kernel (`mmrt_s3_dw_rows`, all interior frames in one call, taps

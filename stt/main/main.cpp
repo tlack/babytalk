@@ -9,6 +9,10 @@
 //   win <T> [mode]           + the 1600x80 int16 input window (bit-exact check vs the
 //                            ESP-PPQ host sim) -> timing + "LOGITS <bytes>" + raw int16
 //   load [internal_kb] [param_copy]
+//   listen <secs> [mode] [trim] [send_audio]
+//                            record from the board's mic now: streams "LEVEL <dBFS> <ms>"
+//                            lines while recording, then trims silence (trim=1) and
+//                            transcribes; send_audio=1 also returns "AUDIO <bytes>" + PCM
 // mode: 0 = auto, 1 = single core, 2 = multi core (ESP-DL runtime_mode_t).
 //
 // The USB console stays for status: `ip`, `load`, `prof`.
@@ -30,8 +34,10 @@
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
 #include "nvs_flash.h"
+#include "mic.h"
 #include "stt_core.h"
 #include "wifi_secrets.h"
+#include <math.h>
 
 extern "C" {
 #include "citrinet_tables.h"
@@ -191,16 +197,114 @@ static int recv_line(int fd, char *buf, size_t cap)
     return (int)i;
 }
 
+// Speech bounds by frame energy: 20 ms frames, threshold = noise floor (10th
+// percentile) + 12 dB, padded 250 ms each side. Returns false if nothing crosses it.
+static bool speech_bounds(const int16_t *pcm, int n, int *b, int *e)
+{
+    const int F = 320, nf = n / F;
+    if (nf < 3) return false;
+    float *db = (float *)heap_caps_malloc(sizeof(float) * nf * 2, MALLOC_CAP_SPIRAM), *srt = db + nf;
+    for (int f = 0; f < nf; f++) {
+        double sq = 0;
+        for (int i = 0; i < F; i++) sq += (double)pcm[f * F + i] * pcm[f * F + i];
+        db[f] = srt[f] = 10.0f * log10f((float)(sq / F) + 1.0f) - 90.3f;  // dBFS
+    }
+    for (int i = 1; i < nf; i++)  // insertion sort: nf <= 800
+        for (int j = i; j > 0 && srt[j - 1] > srt[j]; j--) { float t = srt[j]; srt[j] = srt[j - 1]; srt[j - 1] = t; }
+    float thr = srt[nf / 10] + 12.0f;
+    int first = -1, last = -1;
+    for (int f = 0; f < nf; f++)
+        if (db[f] > thr) { if (first < 0) first = f; last = f; }
+    heap_caps_free(db);
+    if (first < 0) return false;
+    const int pad = 16000 / 4;
+    *b = first * F - pad < 0 ? 0 : first * F - pad;
+    *e = (last + 1) * F + pad > n ? n : (last + 1) * F + pad;
+    return true;
+}
+
+// Features -> model -> CTC on pcm[0:n], rebuilding the graph if its length changed.
+static int transcribe(Out &o, const int16_t *pcm, int n, int mode)
+{
+    int T = stt_num_frames(n);
+    float *feats = (float *)heap_caps_malloc(sizeof(float) * T * MEL_N, MALLOC_CAP_SPIRAM);
+    float *scratch = (float *)heap_caps_malloc(sizeof(float) * stt_scratch_floats(), MALLOC_CAP_INTERNAL);
+    int rc = 1;
+    if (feats && scratch && (g_frames == T || load_model(o, 0, false, T) == 0)) {
+        dl::TensorBase *in = io_tensor(true);
+        int64_t t0 = esp_timer_get_time();
+        stt_features(pcm, n, feats, scratch);
+        stt_fill_quant(feats, T, (int16_t *)in->data, T, (int)in->exponent);
+        rc = run_and_decode(o, T, mode, (esp_timer_get_time() - t0) / 1000.0, n, false);
+    }
+    heap_caps_free(feats);
+    heap_caps_free(scratch);
+    return rc;
+}
+
+static int cmd_listen(Out &o, int secs, int mode, bool trim, bool send_audio)
+{
+    if (secs < 1 || secs > 15) {
+        o.printf("{\"error\":\"secs must be 1..15\"}\n");
+        return 1;
+    }
+    int err = mic_open(14);
+    if (err) {
+        o.printf("{\"error\":\"mic_open %d\"}\n", err);
+        return 1;
+    }
+    const int n = secs * 16000;
+    // Build the graph for the full recording now, so an untrimmed clip starts
+    // inference the moment recording ends.
+    if (g_frames != stt_num_frames(n) && load_model(o, 0, false, stt_num_frames(n))) return 1;
+    int16_t *pcm = (int16_t *)heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM);
+    if (!pcm || mic_start()) {
+        heap_caps_free(pcm);
+        return 1;
+    }
+    o.printf("REC start %d\n", secs);
+    const int chunk = 1600;  // 100 ms
+    for (int done = 0; done < n; done += chunk) {
+        if (mic_read_mono(pcm + done, chunk)) break;
+        double sq = 0;
+        for (int i = 0; i < chunk; i++) sq += (double)pcm[done + i] * pcm[done + i];
+        o.printf("LEVEL %.1f %d\n", 10.0 * log10(sq / chunk + 1.0) - 90.3, (done + chunk) / 16);
+    }
+    mic_stop();
+    int64_t t_end = esp_timer_get_time();
+    o.printf("REC done\n");
+    if (send_audio) {
+        o.printf("AUDIO %d\n", n * 2);
+        o.write(pcm, n * 2);
+    }
+
+    int b = 0, e = n, rc = 0;
+    bool speech = !trim || speech_bounds(pcm, n, &b, &e);
+    // A shorter graph costs a ~0.5 s rebuild; only worth it if it drops > 0.3 s of audio.
+    if (speech && trim && n - (e - b) < 16000 * 3 / 10) b = 0, e = n;
+    o.printf("{\"speech_ms\":%d,\"recorded_ms\":%d,\"trimmed\":%d}\n", (e - b) / 16, n / 16, speech ? n - (e - b) > 0 : 1);
+    if (!speech) {
+        o.printf("{\"text\":\"\"}\n");
+    } else {
+        rc = transcribe(o, pcm + b, e - b, mode);
+    }
+    o.printf("{\"wait_ms\":%.0f}\n", (esp_timer_get_time() - t_end) / 1000.0);
+    heap_caps_free(pcm);
+    return rc;
+}
+
 static int handle(Out &o, char *line)
 {
-    char *argv[4] = {};
+    char *argv[6] = {};
     int argc = 0;
-    for (char *t = strtok(line, " "); t && argc < 4; t = strtok(NULL, " ")) argv[argc++] = t;
+    for (char *t = strtok(line, " "); t && argc < 6; t = strtok(NULL, " ")) argv[argc++] = t;
     if (!argc) return 1;
     int a1 = argc > 1 ? atoi(argv[1]) : 0;
     int a2 = argc > 2 ? atoi(argv[2]) : 1;
 
     if (!strcmp(argv[0], "load")) return load_model(o, a1, argc > 2 && a2);
+    if (!strcmp(argv[0], "listen"))
+        return cmd_listen(o, a1, a2, argc > 3 ? atoi(argv[3]) : 1, argc > 4 && atoi(argv[4]));
     if (ensure_model(o)) return 1;
     int a3 = argc > 3 ? atoi(argv[3]) : 1;  // pcm: 1 = exact-length graph, 0 = static 1600 window
 

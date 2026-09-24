@@ -3,8 +3,7 @@
 #   mpremote cp io_ext.py es7210.py wake_up_tomato_face.json wake_demo.py :
 #   mpremote exec "import wake_demo; wake_demo.run()"
 #
-# io_ext.py / es7210.py: the watchtower node drivers (audio rail on the IO expander, the
-# ES7210 mic ADC). The phrase file comes from export/kws.py --save (tools/wake_phrases/).
+# io_ext.py / es7210.py: mpy/drivers/ (audio rail on the IO expander, the ES7210 mic ADC). The phrase file comes from export/kws.py --save (tools/wake_phrases/).
 # Board: Waveshare ESP32-S3-CAM. Capture is STEREO with MCLK (MONO garbles these codecs;
 # MCLK needs the patched machine.I2S), and stt takes the left slot itself (channels=2).
 import asyncio

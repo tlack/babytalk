@@ -7,8 +7,8 @@ ESP32-S3 (MicroPython firmware with the stt + tts modules, see mpy/README.md).
     uv run --with mpremote tools/echo.py --prefix ""  # just repeat, no "You said:"
 
 The PC only sends "take" and prints what the board reports; recording, transcription
-and synthesis all run on the board. Board files (echo_board.py + the watchtower codec
-drivers) are pushed when missing or changed.
+and synthesis all run on the board. Board files (echo_board.py + the codec drivers in
+mpy/drivers/) are pushed when missing or changed.
 """
 import argparse
 import hashlib
@@ -21,7 +21,7 @@ from pathlib import Path
 from mpremote.transport_serial import SerialTransport
 
 ROOT = Path(__file__).resolve().parent.parent
-DRIVERS = Path(os.environ.get("WATCHTOWER_LIB", Path.home() / "work/bot-efforts/watchtower/node/lib"))
+DRIVERS = ROOT / "mpy/drivers"
 FILES = {
     "echo_board.py": ROOT / "mpy/examples/echo_board.py",
     "io_ext.py": DRIVERS / "io_ext.py",

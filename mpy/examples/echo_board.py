@@ -1,7 +1,7 @@
 # Echo: record from the board's mic, transcribe on-device (stt), speak it back (tts).
 # Board side of tools/echo.py; also usable alone:
 #   import echo_board; echo_board.setup(); echo_board.take(4)
-# Needs io_ext.py, es7210.py, es8311.py (watchtower node drivers) on the board.
+# Needs mpy/drivers/io_ext.py, es7210.py, es8311.py on the board.
 import time
 
 import stt

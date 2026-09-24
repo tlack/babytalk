@@ -4,7 +4,7 @@ The runtime (mmrt), front end, wake-phrase scorer and a small engine, packaged a
 component (`components/stt_engine`) plus a thin MicroPython user C module (`stt/`).
 The model is read in place from a `model` flash partition. Built and verified on the
 Waveshare ESP32-S3-CAM (ESP32-S3R8: 8MB octal PSRAM, 16MB flash) alongside the
-camera API + mp_jpeg modules the watchtower Sentry firmware (`wt2`) carries.
+optional camera API + mp_jpeg modules (github.com/cnadler86/micropython-camera-API).
 
 ```python
 import stt
@@ -54,7 +54,7 @@ the pool needed.
 
 `examples/wake_demo.py`: continuous capture from the ES7210 (machine.I2S, stereo, MCLK),
 a 4 s window scored once a second in the background, then the command after the phrase
-(silence-trimmed). Needs the watchtower `io_ext.py` / `es7210.py` drivers on the board.
+(silence-trimmed). Needs `mpy/drivers/io_ext.py` / `es7210.py` on the board.
 
 ## Measured (int4 model, 4.1 s clip, from MicroPython)
 
@@ -89,7 +89,9 @@ mpy/build.sh            # FW_DIR=~/build/sentry-fw: micropython v1.27.0 (I2S-MCK
                         # IDF_PATH default ~/build/dstike-fw/esp-idf (v5.5.1)
 ```
 
-Recipe for FW_DIR: watchtower `firmware/waveshare_s3_cam/BUILD.md` (the `wt2` build).
+FW_DIR: MicroPython v1.27.0 with `mpy/patches/micropython-i2s-mck.patch` applied (lets
+`machine.I2S` output MCLK, which the ES7210/ES8311 codecs need); add cnadler86's
+micropython-camera-API and mp_jpeg next to it for the camera module (optional).
 `build.sh` adds the board definition (`boards/SENTRY_S3_STT`), `usermods.cmake` (camera +
 stt) and `components/` (stt_engine, which pulls esp-dsp through the component manager),
 and merges `FW_DIR/out/firmware-stt.bin` with the built flash mode kept (QIO 80 MHz: the

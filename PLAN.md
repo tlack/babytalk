@@ -91,6 +91,22 @@ Calibration point (ref [1]): an int8 ESP-DL MobileNetV2 at 128×128 (~100M MACs)
 
 ## 3. Design decisions
 
+- **Interaction model: push-to-talk, slightly async — accuracy first, speed second.**
+  We'd been assuming real-time streaming. With a talk button and on-screen feedback
+  (live waveform while recording, then a "thinking" state), the user already expects
+  a short wait, so **slower than real time is acceptable**: a 3 s command at RTF 0.5–1
+  is a 1.5–3 s wait. Consequences:
+  - **Whole-utterance (offline) models are allowed.** Global context stays: Citrinet's
+    utterance-wide squeeze-excitation, per-utterance feature normalization, and
+    bidirectional context all improve accuracy and need no streaming redesign.
+  - **The budget moves from compute/s to accuracy per wait.** A bigger model (Citrinet-384/512
+    class) at RTF > 1 may beat a real-time small one. Measure WER vs wait time and pick on that.
+  - **The utterance is one chunk,** so weight reuse spans every frame of it (§2 wall 1)
+    with no latency cost.
+  - **Silence gating is trivial:** the button bounds the audio; trim the edges with the VAD.
+  - **Two-pass is natural:** show a fast small-model draft immediately, then replace it
+    with a slower, better pass (bigger model or routed experts from flash).
+  - Streaming stays a later option for dictation / always-on use, not a requirement.
 - **Toolchain:** ESP-DL (int8/int16) + ESP-PPQ quantization from PyTorch → ONNX
   (opset 18). ESP-SR for the audio front end (AFE) only (not MultiNet — that's a fixed-phrase list, not open vocab).
 - **ESP-DL already implements much of the tier plumbing** (ref [1], `dl::Model`):
@@ -280,6 +296,8 @@ data/         (gitignored) datasets, mic captures
   ~20 bits, so long dot products must go through the 40-bit ACCX or be split (ESP-NN's
   kernels already handle this).
 - Can the router decide reliably from the first ~0.5s of an utterance?
+- Push-to-talk UX: how long a wait feels acceptable for a command (1 s? 3 s?) — this
+  sets the largest usable model. Test with a real button + waveform on a board with a screen.
 - Is PSRAM contention with the camera (on camera nodes) a problem while STT runs?
 - Would an ESP32-P4 target be worth a parallel track? Ref [1] shows ~1 GMAC/s class
   int8 inference there with the same ESP-DL model files (re-exported per target), so

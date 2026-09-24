@@ -31,8 +31,42 @@ int mmrt_open(mmrt_model_t *m, const void *image, size_t size)
     return m->T && m->buf ? 0 : -3;
 }
 
+static const int8_t *op_weights(const mmrt_model_t *m, int i)
+{
+    if (m->wcache && m->wcache[i]) return m->wcache[i];
+    return (const int8_t *)(m->blob + m->ops[i].w_off);
+}
+
+size_t mmrt_cache_weights(mmrt_model_t *m, size_t budget, mmrt_alloc_fn alloc, mmrt_free_fn release)
+{
+    const uint32_t n = m->hdr->n_ops;
+    if (m->wcache) {
+        for (uint32_t i = 0; i < n; i++)
+            if (m->wcache[i]) release((void *)m->wcache[i]);
+        free(m->wcache);
+        m->wcache = NULL;
+        m->wcache_bytes = 0;
+    }
+    if (!budget) return 0;
+    m->wcache = (const int8_t **)calloc(n, sizeof(*m->wcache));
+    if (!m->wcache) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const mmrt_op_t *op = &m->ops[i];
+        if (op->kind != MMRT_CONV1X1) continue;
+        size_t bytes = (size_t)m->tensors[op->in0].channels * m->tensors[op->out].channels;
+        if (m->wcache_bytes + bytes > budget) break;
+        int8_t *c = (int8_t *)alloc(bytes);
+        if (!c) break;
+        memcpy(c, m->blob + op->w_off, bytes);
+        m->wcache[i] = c;
+        m->wcache_bytes += bytes;
+    }
+    return m->wcache_bytes;
+}
+
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release)
 {
+    mmrt_cache_weights(m, 0, NULL, release);
     if (m->buf) {
         for (uint32_t i = 0; i < m->hdr->n_tensors; i++)
             if (m->buf[i] && i != m->hdr->input) release(m->buf[i]);
@@ -122,7 +156,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
         for (int i = 0; sops && i < n_ops; i++) {
             const mmrt_op_t *op = &m->ops[i];
             if (op->kind != MMRT_CONV1X1) continue;
-            sops[ns].w = (const int8_t *)(m->blob + op->w_off);
+            sops[ns].w = op_weights(m, i);
             sops[ns].C = m->tensors[op->in0].channels;
             sops[ns].N = m->tensors[op->out].channels;
             ns++;
@@ -184,7 +218,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             }
             const int32_t *b = pw->b_off != 0xffffffffu ? (const int32_t *)(m->blob + pw->b_off) : NULL;
             if (mmrt_s3_dw_pw(m->buf[op->in0], Tx, Cx, (const int8_t *)(m->blob + op->w_off), op->K, op->stride,
-                              op->pad, op->shift, op->relu, (const int8_t *)(m->blob + pw->w_off), b, N, pw->shift,
+                              op->pad, op->shift, op->relu, op_weights(m, i + 1), b, N, pw->shift,
                               pw->relu, y, T)) {
                 m->buf[pw->out] = y;
                 m->T[pw->out] = T;
@@ -210,7 +244,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             free(last);
             return NULL;
         }
-        const int8_t *w = (const int8_t *)(m->blob + op->w_off);
+        const int8_t *w = op->kind == MMRT_CONV1X1 ? op_weights(m, i) : (const int8_t *)(m->blob + op->w_off);
         switch (op->kind) {
         case MMRT_DWCONV:
 #ifdef MMRT_S3

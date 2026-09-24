@@ -71,6 +71,8 @@ typedef struct {
     const uint8_t *blob;
     int *T;                   // frames per tensor for the planned input length
     int8_t **buf;             // activation buffers (NULL when not live)
+    const int8_t **wcache;    // per op: faster copy of its weights (e.g. PSRAM), or NULL
+    size_t wcache_bytes;
 } mmrt_model_t;
 
 // Allocator hooks: activations can be large (PSRAM on the S3).
@@ -87,6 +89,12 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                        mmrt_alloc_fn alloc, mmrt_free_fn release);
 
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release);
+
+// Optional: copy 1x1-conv weights (in op order) into memory from `alloc` until `budget`
+// bytes are used, e.g. PSRAM (~88 MB/s) when the image is in flash (~32 MB/s): every
+// inference reads all weights once, so each cached MB saves ~20 ms per run on the S3 --
+// at the cost of that much PSRAM. budget 0 releases the cache. Returns bytes cached.
+size_t mmrt_cache_weights(mmrt_model_t *m, size_t budget, mmrt_alloc_fn alloc, mmrt_free_fn release);
 
 // 1 = use the portable reference ops even where an optimized kernel exists (A/B checks).
 extern int mmrt_use_ref;

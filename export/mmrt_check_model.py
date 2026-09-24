@@ -50,7 +50,7 @@ def main():
     _, _, vocab, _ = load_model()
     image = MODEL.read_bytes()
     img_buf = ctypes.create_string_buffer(image, len(image))
-    model = ctypes.create_string_buffer(64)
+    model = ctypes.create_string_buffer(256)  # >= sizeof(mmrt_model_t)
     assert lib.mmrt_open(model, img_buf, len(image)) == 0
     lib.mmrt_run.restype = ctypes.POINTER(ctypes.c_int8)
     lib.mmrt_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int8), ctypes.c_int,

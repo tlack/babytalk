@@ -50,6 +50,7 @@ def board_feats(host, feats):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=os.environ.get("STT_HOST", "192.168.1.154"))
+    ap.add_argument("--model", default=str(MODEL), help="the image flashed to the board's model partition")
     ap.add_argument("clips", nargs="*", default=["me-hello-world", "me-we-the-people", "1089-134686-0000"])
     a = ap.parse_args()
     lib = build()
@@ -58,9 +59,9 @@ def main():
     libc.malloc.argtypes = [ctypes.c_size_t]
     libc.free.argtypes = [ctypes.c_void_p]
     alloc, free = ALLOC(lambda n: libc.malloc(n)), FREE(lambda p: libc.free(p))
-    image = MODEL.read_bytes()
+    image = open(a.model, "rb").read()
     buf = ctypes.create_string_buffer(image, len(image))
-    model = ctypes.create_string_buffer(64)
+    model = ctypes.create_string_buffer(256)
     assert lib.mmrt_open(model, buf, len(image)) == 0
     lib.mmrt_run.restype = ctypes.POINTER(ctypes.c_int8)
     lib.mmrt_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int8), ctypes.c_int,

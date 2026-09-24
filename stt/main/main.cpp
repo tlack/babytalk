@@ -430,7 +430,7 @@ static int ktest(Out &o)
         mmrt_conv1x1_ref(x, c.T * c.stride, c.C, w, c.bias ? b : NULL, c.N, c.stride, c.shift, c.relu, y0, c.T);
         int64_t t_ref = esp_timer_get_time() - t0;
         t0 = esp_timer_get_time();
-        mmrt_s3_conv1x1(x, c.T * c.stride, c.C, w, c.bias ? b : NULL, c.N, c.stride, c.shift, c.relu, y1, c.T);
+        mmrt_s3_conv1x1(x, c.T * c.stride, c.C, w, MMRT_W_INT8, c.bias ? b : NULL, c.N, c.stride, c.shift, c.relu, y1, c.T);
         int64_t t_s3 = esp_timer_get_time() - t0;
         int bad = 0, first = -1;
         for (size_t i = 0; i < yn; i++)

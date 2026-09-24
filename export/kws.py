@@ -145,7 +145,7 @@ class Model:
         self.alloc, self.free = ALLOC(lambda n: libc.malloc(n)), FREE(lambda p: libc.free(p))
         img = MODEL.read_bytes()
         self.buf = ctypes.create_string_buffer(img, len(img))
-        self.model = ctypes.create_string_buffer(64)
+        self.model = ctypes.create_string_buffer(256)  # >= sizeof(mmrt_model_t)
         assert self.lib.mmrt_open(self.model, self.buf, len(img)) == 0
         self.lib.mmrt_run.restype = ctypes.POINTER(ctypes.c_int8)
         self.lib.mmrt_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int8), ctypes.c_int,

@@ -20,7 +20,7 @@ int mmrt_open(mmrt_model_t *m, const void *image, size_t size)
 {
     memset(m, 0, sizeof(*m));
     const mmrt_header_t *h = (const mmrt_header_t *)image;
-    if (size < sizeof(*h) || h->magic != MMRT_MAGIC || h->version != MMRT_VERSION) return -1;
+    if (size < sizeof(*h) || h->magic != MMRT_MAGIC || h->version < 1 || h->version > MMRT_VERSION) return -1;
     if (h->blob_off + h->blob_size > size) return -2;
     m->hdr = h;
     m->tensors = (const mmrt_tensor_t *)((const uint8_t *)image + h->tensors_off);
@@ -29,6 +29,32 @@ int mmrt_open(mmrt_model_t *m, const void *image, size_t size)
     m->T = (int *)calloc(h->n_tensors, sizeof(int));
     m->buf = (int8_t **)calloc(h->n_tensors, sizeof(int8_t *));
     return m->T && m->buf ? 0 : -3;
+}
+
+size_t mmrt_wgroup_bytes(int C, int wfmt)
+{
+    return wfmt == MMRT_W_CB4 ? 256 + (size_t)C * 8 : (size_t)C * 16;
+}
+
+void mmrt_wload(int8_t *dst, const int8_t *w, int wfmt, int C, int g0, int ng)
+{
+    const size_t gb = mmrt_wgroup_bytes(C, wfmt);
+    const uint8_t *src = (const uint8_t *)w + (size_t)g0 * gb;
+    if (wfmt != MMRT_W_CB4) {
+        memcpy(dst, src, (size_t)ng * gb);
+        return;
+    }
+    for (int g = 0; g < ng; g++, src += gb) {
+        int8_t tab[256];  // [lane][level], local: the source may be slow memory
+        memcpy(tab, src, 256);
+        const uint8_t *idx = src + 256;
+        for (int c = 0; c < C; c++, idx += 8, dst += 16)
+            for (int j = 0; j < 8; j++) {
+                const uint8_t b = idx[j];
+                dst[2 * j] = tab[(2 * j) * 16 + (b & 15)];
+                dst[2 * j + 1] = tab[(2 * j + 1) * 16 + (b >> 4)];
+            }
+    }
 }
 
 static const int8_t *op_weights(const mmrt_model_t *m, int i)
@@ -57,7 +83,8 @@ size_t mmrt_cache_weights(mmrt_model_t *m, size_t budget, mmrt_alloc_fn alloc, m
         for (uint32_t i = 0; i < n; i++) {
             const mmrt_op_t *op = &m->ops[i];
             if (op->kind != (pass ? MMRT_CONV1X1 : MMRT_DWCONV)) continue;
-            size_t bytes = (size_t)m->tensors[op->in0].channels * (pass ? m->tensors[op->out].channels : op->K);
+            const int C = m->tensors[op->in0].channels;
+            size_t bytes = pass ? mmrt_wgroup_bytes(C, op->wfmt) * (m->tensors[op->out].channels / 16) : (size_t)C * op->K;
             if (m->wcache_bytes + bytes > budget) goto done;
             int8_t *c = (int8_t *)alloc(bytes);
             if (!c) goto done;
@@ -162,6 +189,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             const mmrt_op_t *op = &m->ops[i];
             if (op->kind != MMRT_CONV1X1) continue;
             sops[ns].w = op_weights(m, i);
+            sops[ns].wfmt = op->wfmt;
             sops[ns].C = m->tensors[op->in0].channels;
             sops[ns].N = m->tensors[op->out].channels;
             ns++;
@@ -223,7 +251,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             }
             const int32_t *b = pw->b_off != 0xffffffffu ? (const int32_t *)(m->blob + pw->b_off) : NULL;
             if (mmrt_s3_dw_pw(m->buf[op->in0], Tx, Cx, op_weights(m, i), op->K, op->stride,
-                              op->pad, op->shift, op->relu, op_weights(m, i + 1), b, N, pw->shift,
+                              op->pad, op->shift, op->relu, op_weights(m, i + 1), pw->wfmt, b, N, pw->shift,
                               pw->relu, y, T)) {
                 m->buf[pw->out] = y;
                 m->T[pw->out] = T;
@@ -265,10 +293,23 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             const int32_t *b = op->b_off != 0xffffffffu ? (const int32_t *)(m->blob + op->b_off) : NULL;
 #ifdef MMRT_S3
             if (!mmrt_use_ref)
-                mmrt_s3_conv1x1(x, Tx, Cx, w, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+                mmrt_s3_conv1x1(x, Tx, Cx, w, op->wfmt, b, Cy, op->stride, op->shift, op->relu, y, Ty);
             else
 #endif
+            if (op->wfmt == MMRT_W_INT8) {
                 mmrt_conv1x1_ref(x, Tx, Cx, w, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+            } else {  // reference path: decode the whole op first
+                int8_t *wd = (int8_t *)alloc((size_t)Cx * Cy);
+                if (!wd) {
+                    release(y);
+                    STREAM_END();
+                    free(last);
+                    return NULL;
+                }
+                mmrt_wload(wd, w, op->wfmt, Cx, 0, Cy / 16);
+                mmrt_conv1x1_ref(x, Tx, Cx, wd, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+                release(wd);
+            }
         }
             break;
         case MMRT_MEAN:

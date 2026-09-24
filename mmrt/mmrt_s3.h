@@ -23,7 +23,8 @@ int mmrt_s3_init(void);
 // Diagnostic: cycles per VSMULAS (16 MACs) of the 1x1 row kernel on the calling core.
 float mmrt_s3_c1_bench(int groups, int C, int frames, int where);
 
-void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
+// w: in format wfmt (mmrt_wfmt_t); staged/decoded into SRAM as int8.
+void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, int wfmt, const int32_t *bias, int N,
                      int stride, int shift, int relu, int8_t *y, int T_out);
 
 void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,
@@ -41,7 +42,7 @@ void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y)
 // shapes don't fit (then run the two ops separately). Same results as the two kernels.
 extern int mmrt_s3_fuse;
 int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, int stride, int pad, int dw_shift,
-                  int dw_relu, const int8_t *pw_w, const int32_t *bias, int N, int pw_shift, int pw_relu, int8_t *y,
+                  int dw_relu, const int8_t *pw_w, int pw_wfmt, const int32_t *bias, int N, int pw_shift, int pw_relu, int8_t *y,
                   int T);
 
 // Weight streaming for short inputs (see mmrt_s3.c): the executor lists its 1x1 ops in
@@ -49,6 +50,7 @@ int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, i
 // isn't used (long input, one core, ...), and the kernels then run as usual.
 typedef struct {
     const int8_t *w;
+    int wfmt;
     int C, N;
 } mmrt_s3_stream_op_t;
 extern int mmrt_s3_stream_max_T;  // input frames; 0 disables

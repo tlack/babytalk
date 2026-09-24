@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 #define MMRT_MAGIC 0x54524d4du  // "MMRT"
-#define MMRT_VERSION 1
+#define MMRT_VERSION 2  // 2: per-op weight format (wfmt); version-1 files (all int8) still load
 
 typedef enum {
     MMRT_DWCONV = 1,   // depthwise conv, weights [C/16][K][16], no bias
@@ -29,6 +29,17 @@ typedef enum {
     MMRT_MUL = 5,      // y[t][c] = x[t][c] * s[c]   (in1 is the [1][C] vector)
     MMRT_ADD = 6,      // y = a + b
 } mmrt_kind_t;
+
+// 1x1-conv weight formats (mmrt_op_t.wfmt). Both describe [N/16][C][16] int8 weights:
+//   INT8  as is.
+//   CB4   4-bit codebook: per output group of 16 channels, a [16 lanes][16 levels] int8
+//         table (256 B) then C rows of 8 bytes, byte j = lane 2j (low nibble) | lane 2j+1
+//         (high nibble); weight = table[lane][nibble]. 256 + 8*C bytes per group instead
+//         of 16*C. Decoded to int8 while staging, so kernels and results are unchanged.
+typedef enum {
+    MMRT_W_INT8 = 0,
+    MMRT_W_CB4 = 1,
+} mmrt_wfmt_t;
 
 typedef struct {
     uint32_t magic, version;
@@ -52,7 +63,8 @@ typedef struct {
     int8_t pad, shift;        // conv: zero padding each side, requant right shift
     int8_t e_a, e_b;          // input exponents (mean/mul/add)
     int8_t e_out;
-    uint8_t pad_[3];
+    uint8_t wfmt;             // mmrt_wfmt_t (1x1 conv weights)
+    uint8_t pad_[2];
     uint16_t in0, in1, out;   // tensor ids (in1 = 0xffff if unused)
     uint16_t pad2_;
     uint32_t w_off, b_off;    // blob offsets (0xffffffff if none); LUT uses w_off
@@ -89,6 +101,13 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                        mmrt_alloc_fn alloc, mmrt_free_fn release);
 
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release);
+
+// Bytes of one output group (16 channels) of 1x1 weights with C inputs, in format wfmt.
+size_t mmrt_wgroup_bytes(int C, int wfmt);
+
+// Output groups [g0, g0 + ng) of an op's 1x1 weights `w` (format wfmt, C inputs) as int8
+// [ng][C][16] into dst: a copy for INT8, a decode for CB4.
+void mmrt_wload(int8_t *dst, const int8_t *w, int wfmt, int C, int g0, int ng);
 
 // Optional: copy depthwise, then 1x1-conv weights (in op order) into memory from `alloc` until `budget`
 // bytes are used, e.g. PSRAM (~88 MB/s) when the image is in flash (~32 MB/s): every

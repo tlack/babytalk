@@ -1,6 +1,8 @@
 // mmrt ESP32-S3 kernels: C drivers around the PIE assembly in mmrt_s3.S.
 #include "mmrt_s3.h"
 
+#include "mmrt.h"
+
 #include <string.h>
 
 #include "esp_attr.h"
@@ -138,14 +140,13 @@ static void streamer(void *arg, int part)
     int s = 0;
     for (int i = 0; i < S.n_ops && !S.stop; i++) {
         const mmrt_s3_stream_op_t *op = &S.ops[i];
-        const size_t gb = (size_t)op->C * 16;
         const int groups = op->N / 16, cg = slot_groups(op->C);
         for (int g0 = 0; g0 < groups; g0 += cg) {
             int ng = groups - g0 < cg ? groups - g0 : cg;
             xSemaphoreTake(S.free_slots, portMAX_DELAY);
             if (S.stop) return;
             int64_t t0 = esp_timer_get_time();
-            memcpy(S.slot[s], op->w + (size_t)g0 * gb, (size_t)ng * gb);
+            mmrt_wload(S.slot[s], op->w, op->wfmt, op->C, g0, ng);
             mmrt_s3_stage_us[0] += esp_timer_get_time() - t0;
             S.desc[s].op = i;
             S.desc[s].g0 = g0;
@@ -235,7 +236,8 @@ static void pack_bias(const int32_t *bias, int N, uint8_t *dst)
 typedef struct {
     mmrt_s3_c1_t a;       // groups/bias_q cover the whole chunk
     int8_t *y;            // output, column offset of the chunk's first group applied
-    const int8_t *x, *w;  // w: the chunk's weights (in flash or wherever they live)
+    const int8_t *x, *w;  // w: the op's weights (in flash or wherever they live), format wfmt
+    int wfmt, g0;         // g0: the chunk's first group
     int N, C, stride, T;
 } c1_job_t;
 
@@ -247,13 +249,12 @@ static void c1_part(void *arg, int part)
     int b, e;
     part_range(j->a.groups, part, &b, &e);
     if (e <= b) return;
-    const size_t group_bytes = (size_t)j->C * 16;
-    const int8_t *w = j->w + (size_t)b * group_bytes;
+    const int8_t *w = j->w + (size_t)(j->g0 + b) * j->C * 16;  // in place (INT8 only)
     const int core = part == 1 ? 1 : 0;
     int64_t t0 = esp_timer_get_time();
-    if (mmrt_s3_stage && !esp_ptr_internal(w)) {
+    if (j->wfmt != MMRT_W_INT8 || (mmrt_s3_stage && !esp_ptr_internal(w))) {
         int8_t *buf = part == 1 ? s_wstage1 : s_wstage0;
-        memcpy(buf, w, (size_t)(e - b) * group_bytes);
+        mmrt_wload(buf, j->w, j->wfmt, j->C, j->g0 + b, e - b);
         w = buf;
     }
     int64_t t1 = esp_timer_get_time();
@@ -266,7 +267,7 @@ static void c1_part(void *arg, int part)
     mmrt_s3_c1_us[core] += esp_timer_get_time() - t1;
 }
 
-void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
+void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, int wfmt, const int32_t *bias, int N,
                      int stride, int shift, int relu, int8_t *y, int T_out)
 {
     (void)T_in;
@@ -301,7 +302,7 @@ void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const in
     for (int g0 = 0; g0 < groups; g0 += chunk) {
         int ng = groups - g0 < chunk ? groups - g0 : chunk;
         c1_job_t job = {{bias ? s_bias_q + (size_t)g0 * 64 : NULL, C / 16 - 1, ng, shift, relu},
-                        y + g0 * 16, x, w + (size_t)g0 * group_bytes, N, C, stride, T_out};
+                        y + g0 * 16, x, w, wfmt, g0, N, C, stride, T_out};
         if (two && ng > 1)
             run_parts(c1_part, &job);
         else
@@ -386,7 +387,7 @@ static void fused_part(void *arg, int part)
 int mmrt_s3_fuse = 1;
 
 int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, int stride, int pad, int dw_shift,
-                  int dw_relu, const int8_t *pw_w, const int32_t *bias, int N, int pw_shift, int pw_relu, int8_t *y,
+                  int dw_relu, const int8_t *pw_w, int pw_wfmt, const int32_t *bias, int N, int pw_shift, int pw_relu, int8_t *y,
                   int T)
 {
     const int G = N / 16, gA = G / 2;
@@ -397,8 +398,8 @@ int mmrt_s3_dw_pw(const int8_t *x, int T_in, int C, const int8_t *dw_w, int K, i
     if (!s_wstage1) s_wstage1 = (int8_t *)heap_caps_aligned_alloc(16, W_STAGE_BYTES, MALLOC_CAP_INTERNAL);
     if (!s_wstage1) return 0;
     int64_t t0 = esp_timer_get_time();
-    memcpy(s_wstage0, pw_w, (size_t)gA * gb);
-    memcpy(s_wstage1, pw_w + (size_t)gA * gb, (size_t)(G - gA) * gb);
+    mmrt_wload(s_wstage0, pw_w, pw_wfmt, C, 0, gA);
+    mmrt_wload(s_wstage1, pw_w, pw_wfmt, C, gA, G - gA);
     mmrt_s3_stage_us[0] += esp_timer_get_time() - t0;
     if (bias) pack_bias(bias, N, s_bias_q);
     fused_job_t j = {{x, dw_w, NULL, T_in, C, K, stride, pad, dw_shift, dw_relu, T},

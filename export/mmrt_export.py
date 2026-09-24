@@ -15,7 +15,7 @@ import numpy as np
 from mmrt_info import MMRT, parse
 
 OUT = MMRT / "citrinet256_int8.mmrt"
-MAGIC, VERSION = 0x54524D4D, 1
+MAGIC, VERSION = 0x54524D4D, 2  # 2: per-op weight format byte (mmrt_op_t.wfmt)
 KIND = {"dwconv": 1, "conv1x1": 2, "mean": 3, "lut": 4, "mul": 5, "add": 6}
 NONE16, NONE32 = 0xFFFF, 0xFFFFFFFF
 HDR = struct.Struct("<16I")          # mmrt_header_t: 11 fields + 5 reserved

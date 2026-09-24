@@ -167,3 +167,82 @@ mmrt_s3_dw_row:
     bnez    a8, .Ldw_group
     retw
     .size   mmrt_s3_dw_row, .-mmrt_s3_dw_row
+
+// void mmrt_s3_tail_row(int8_t *y, const int8_t *a, const int8_t *s, const int8_t *r,
+//                       const mmrt_s3_tail_t *t)
+//
+// Fused Citrinet block tail for one time row (all channel groups):
+//   m = s ? sat8(round_half_up(a[i] * s[i] >> shift)) : a[i]     (SE scale, shift >= 1)
+//   v = r ? sat8(m + r[i]) : m                                    (residual add)
+//   y = relu ? max(v, 0) : v
+// t: groups, shift, relu. s/r may be NULL. All pointers 16-byte aligned.
+    .align 4
+    .global mmrt_s3_tail_row
+    .type   mmrt_s3_tail_row, @function
+mmrt_s3_tail_row:
+    entry   a1, 32
+    l32i    a8, a6, 0           // groups   (t: 5th argument, a6)
+    l32i    a10, a6, 4          // shift
+    l32i    a11, a6, 8          // relu
+    movi    a12, 0x101
+    slli    a13, a12, 16
+    or      a12, a12, a13
+    ee.movi.32.q q7, a12, 0
+    ee.movi.32.q q7, a12, 1
+    ee.movi.32.q q7, a12, 2
+    ee.movi.32.q q7, a12, 3
+    ee.zero.q q6
+    addi    a14, a10, -1        // shift - 1
+    movi    a15, 1
+.Ltail_group:
+    ee.vld.128.ip q3, a3, 16    // a
+    beqz    a4, .Ltail_nomul
+    ee.vld.128.ip q1, a4, 16    // s
+    ee.zero.qacc
+    ee.vmulas.s8.qacc q3, q1    // QACC[i] = a[i] * s[i]
+    ee.srcmb.s8.qacc q3, a14, 0
+    ee.movi.32.q q3, a15, 0
+    ee.vsmulas.s8.qacc q7, q3, 0
+    ee.srcmb.s8.qacc q3, a15, 0
+.Ltail_nomul:
+    beqz    a5, .Ltail_noadd
+    ee.vld.128.ip q2, a5, 16    // r
+    ee.vadds.s8 q3, q3, q2
+.Ltail_noadd:
+    beqz    a11, .Ltail_store
+    ee.vmax.s8 q3, q3, q6
+.Ltail_store:
+    ee.vst.128.ip q3, a2, 16
+    addi    a8, a8, -1
+    bnez    a8, .Ltail_group
+    retw
+    .size   mmrt_s3_tail_row, .-mmrt_s3_tail_row
+
+// void mmrt_s3_colsum16(const int8_t *x, int T, int C, uint8_t *qacc_out)
+//
+// Column sums of 16 channels over T rows (rows C bytes apart): QACC[i] += x[t][i] * 1.
+// Stores QACC as the 64-byte packed form (two halves of 8 x 20-bit lanes, each half
+// padded to 32 bytes) for C to unpack. |sum| must stay below 2^19.
+    .align 4
+    .global mmrt_s3_colsum16
+    .type   mmrt_s3_colsum16, @function
+mmrt_s3_colsum16:
+    entry   a1, 32
+    movi    a12, 0x101
+    slli    a13, a12, 16
+    or      a12, a12, a13
+    ee.movi.32.q q5, a12, 0     // q5 = 1 in every byte
+    ee.movi.32.q q5, a12, 1
+    ee.movi.32.q q5, a12, 2
+    ee.movi.32.q q5, a12, 3
+    ee.zero.qacc
+    loopgtz a3, .Lcs_done
+    ee.vld.128.xp q0, a2, a4
+    ee.vmulas.s8.qacc q0, q5
+.Lcs_done:
+    ee.st.qacc_l.l.128.ip a5, 16
+    ee.st.qacc_l.h.32.ip  a5, 16
+    ee.st.qacc_h.l.128.ip a5, 16
+    ee.st.qacc_h.h.32.ip  a5, 16
+    retw
+    .size   mmrt_s3_colsum16, .-mmrt_s3_colsum16

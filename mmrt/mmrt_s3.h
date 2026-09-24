@@ -18,6 +18,14 @@ void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, const in
 void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,
                     int shift, int relu, int8_t *y, int T_out);
 
+// Fused block tail: y = relu?(sat8(round(a*s >> shift) + r)); s (a [C] vector, shift >= 1)
+// and r ([T][C]) may be NULL. Bit-exact with mmrt_mul_bcast_ref -> mmrt_add_ref (equal
+// exponents) -> ReLU.
+void mmrt_s3_tail(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y);
+
+// Same as mmrt_mean_ref; column sums in QACC (T * 128 must stay below 2^19).
+void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y);
+
 #ifdef __cplusplus
 }
 #endif

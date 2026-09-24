@@ -27,6 +27,15 @@ typedef struct {
 
 void mmrt_s3_dw_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_s3_dw_t *a);
 
+typedef struct {
+    int groups;
+    int shift;
+    int relu;
+} mmrt_s3_tail_t;
+
+void mmrt_s3_tail_row(int8_t *y, const int8_t *a, const int8_t *s, const int8_t *r, const mmrt_s3_tail_t *t);
+void mmrt_s3_colsum16(const int8_t *x, int T, int C, uint8_t *qacc_out);
+
 // Internal-SRAM staging: 1x1 weights are re-read for every output frame, so they are
 // copied here (from flash) once per op instead of streaming through the cache per frame.
 #define W_STAGE_BYTES (64 * 1024)
@@ -84,5 +93,44 @@ void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, in
         int k1 = start + K > T_in ? T_in - start : K;
         a.nk = k1 - k0;
         mmrt_s3_dw_row(y + (size_t)t * C, x + (size_t)(start + k0) * C, w + k0 * 16, &a);
+    }
+}
+
+void mmrt_s3_tail(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y)
+{
+    mmrt_s3_tail_t t = {C / 16, shift, relu};
+    for (int i = 0; i < T; i++) {
+        size_t off = (size_t)i * C;
+        mmrt_s3_tail_row(y + off, a + off, s, r ? r + off : NULL, &t);
+    }
+}
+
+// Unpack one 64-byte QACC dump (see pack_bias) into 16 sign-extended int32 lanes.
+static void unpack_qacc(const uint8_t *q, int32_t *out)
+{
+    for (int n = 0; n < 16; n++) {
+        const uint8_t *half = q + (n / 8) * 32;
+        int bit = (n % 8) * 20;
+        uint32_t v = 0;
+        for (int b = 0; b < 20; b++, bit++) v |= (uint32_t)(half[bit / 8] >> (bit % 8) & 1) << b;
+        out[n] = (int32_t)(v << 12) >> 12;
+    }
+}
+
+static inline int64_t floordiv64(int64_t a, int64_t b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
+
+void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y)
+{
+    static DRAM_ATTR uint8_t q[64] __attribute__((aligned(16)));
+    int32_t sums[16];
+    int k = e_in - e_out;  // value = sum * 2^k / T, rounded half up (as mmrt_mean_ref)
+    for (int g = 0; g < C / 16; g++) {
+        mmrt_s3_colsum16(x + g * 16, T, C, q);
+        unpack_qacc(q, sums);
+        for (int i = 0; i < 16; i++) {
+            int64_t num = k >= 0 ? (int64_t)sums[i] << k : sums[i], den = k >= 0 ? T : (int64_t)T << -k;
+            int64_t v = floordiv64(2 * num + den, 2 * den);
+            y[g * 16 + i] = v > 127 ? 127 : (v < -128 ? -128 : (int8_t)v);
+        }
     }
 }

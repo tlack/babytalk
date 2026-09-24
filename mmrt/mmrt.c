@@ -44,6 +44,56 @@ void mmrt_close(mmrt_model_t *m, mmrt_free_fn release)
 
 static int conv_out_len(int T, int K, int stride, int pad) { return (T + 2 * pad - K) / stride + 1; }
 
+#ifdef MMRT_S3
+// A LUT op that is exactly ReLU at an unchanged exponent (vector max instead of a lookup).
+static int is_relu_lut(const mmrt_model_t *m, const mmrt_op_t *op)
+{
+    if (op->kind != MMRT_LUT || m->tensors[op->in0].exp != op->e_out) return 0;
+    const int8_t *lut = (const int8_t *)(m->blob + op->w_off);
+    for (int v = -128; v < 128; v++)
+        if (lut[v + 128] != (v > 0 ? v : 0)) return 0;
+    return 1;
+}
+
+// Fused block tail starting at op i: [MUL] -> [ADD] -> ReLU LUT (at least two of them),
+// each intermediate used only by the next op, ADD at equal exponents. Returns the number
+// of ops covered (0 = not fusable) and the kernel's operands.
+static int match_tail(const mmrt_model_t *m, const int *last, int i, int n_ops, const int8_t **a,
+                      const int8_t **s, const int8_t **r, int *shift, uint16_t *out)
+{
+    const mmrt_op_t *op = &m->ops[i];
+    int j = i;
+    *s = NULL;
+    *r = NULL;
+    *shift = 0;
+    *a = m->buf[op->in0];
+    if (op->kind == MMRT_MUL) {
+        *s = m->buf[op->in1];
+        *shift = op->e_out - op->e_a - op->e_b;
+        if (*shift < 1) return 0;
+        j++;
+    }
+    if (j < n_ops && m->ops[j].kind == MMRT_ADD) {
+        const mmrt_op_t *ad = &m->ops[j];
+        uint16_t prev = j > i ? m->ops[i].out : NONE16;
+        if (prev != NONE16) {
+            if (ad->in0 != prev && ad->in1 != prev) return 0;
+            if (last[prev] != j) return 0;
+            *r = m->buf[ad->in0 == prev ? ad->in1 : ad->in0];
+        } else {
+            *r = m->buf[ad->in1];
+        }
+        if (ad->e_a != ad->e_b || ad->e_a != ad->e_out) return 0;
+        j++;
+    }
+    if (j == i || j >= n_ops) return 0;
+    const mmrt_op_t *lu = &m->ops[j];
+    if (!is_relu_lut(m, lu) || lu->in0 != m->ops[j - 1].out || last[m->ops[j - 1].out] != j) return 0;
+    *out = lu->out;
+    return j - i + 1;
+}
+#endif
+
 const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_out,
                        mmrt_alloc_fn alloc, mmrt_free_fn release)
 {
@@ -65,6 +115,38 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
 
     for (int i = 0; i < n_ops; i++) {
         const mmrt_op_t *op = &m->ops[i];
+#ifdef MMRT_S3
+        if (!mmrt_use_ref && (op->kind == MMRT_MUL || op->kind == MMRT_ADD)) {
+            const int8_t *a, *s, *r;
+            int shift;
+            uint16_t out;
+            int span = match_tail(m, last, i, n_ops, &a, &s, &r, &shift, &out);
+            if (span) {
+                const int T = m->T[op->in0], C = m->tensors[op->in0].channels;
+                int8_t *y = (int8_t *)alloc((size_t)T * C);
+                if (!y) {
+                    free(last);
+                    return NULL;
+                }
+                mmrt_s3_tail(a, s, r, T, C, shift, 1, y);
+                m->buf[out] = y;
+                m->T[out] = T;
+                if (mmrt_trace) mmrt_trace(i + span - 1, &m->ops[i + span - 1], y, T, C);
+                for (int j = i; j < i + span; j++) {  // free inputs whose last use was in the span
+                    uint16_t ins[2] = {m->ops[j].in0, m->ops[j].in1};
+                    for (int k = 0; k < 2; k++) {
+                        if (ins[k] != NONE16 && last[ins[k]] >= i && last[ins[k]] < i + span &&
+                            ins[k] != h->input && m->buf[ins[k]]) {
+                            release(m->buf[ins[k]]);
+                            m->buf[ins[k]] = NULL;
+                        }
+                    }
+                }
+                i += span - 1;
+                continue;
+            }
+        }
+#endif
         const int8_t *x = m->buf[op->in0];
         const int Tx = m->T[op->in0], Cx = m->tensors[op->in0].channels, Cy = m->tensors[op->out].channels;
         int Ty = Tx;
@@ -97,7 +179,12 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
         }
             break;
         case MMRT_MEAN:
-            mmrt_mean_ref(x, Tx, Cx, op->e_a, op->e_out, y);
+#ifdef MMRT_S3
+            if (!mmrt_use_ref && Tx * 128 < (1 << 19))
+                mmrt_s3_mean(x, Tx, Cx, op->e_a, op->e_out, y);
+            else
+#endif
+                mmrt_mean_ref(x, Tx, Cx, op->e_a, op->e_out, y);
             break;
         case MMRT_LUT:
             mmrt_lut_ref(x, Tx * Cx, w, y);

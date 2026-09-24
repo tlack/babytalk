@@ -379,6 +379,54 @@ static int ktest(Out &o)
         if (first >= 0) o.printf("{\"at\":%d,\"ref\":%d,\"s3\":%d}\n", first, y0[first], y1[first]);
         psram_free(x); psram_free(w); psram_free(y0); psram_free(y1);
     }
+    // mean over time (column sums in QACC)
+    struct { int T, k; } mcases[] = {{1, 0}, {50, 1}, {800, 2}, {401, 0}, {7, 2}};
+    for (auto &c : mcases) {
+        const int C = 256;
+        int8_t *x = (int8_t *)psram_alloc((size_t)c.T * C), y0[256], y1[256];
+        for (int i = 0; i < c.T * C; i++) x[i] = rnd8();
+        int64_t t0 = esp_timer_get_time();
+        mmrt_mean_ref(x, c.T, C, c.k, 0, y0);
+        int64_t t_ref = esp_timer_get_time() - t0;
+        t0 = esp_timer_get_time();
+        mmrt_s3_mean(x, c.T, C, c.k, 0, y1);
+        int64_t t_s3 = esp_timer_get_time() - t0;
+        int bad = 0;
+        for (int i = 0; i < C; i++) bad += y0[i] != y1[i];
+        fails += bad > 0;
+        o.printf("{\"kernel\":\"mean\",\"T\":%d,\"k\":%d,\"bad\":%d,\"ref_us\":%lld,\"s3_us\":%lld}\n", c.T, c.k, bad,
+                 (long long)t_ref, (long long)t_s3);
+        psram_free(x);
+    }
+    // fused tail vs mul -> add -> relu reference chain
+    struct { int T, shift, mul, add; } tcases[] = {{64, 7, 1, 1}, {64, 5, 1, 0}, {64, 0, 0, 1}, {800, 8, 1, 1}, {1, 6, 1, 1}};
+    for (auto &c : tcases) {
+        const int C = 256;
+        size_t n = (size_t)c.T * C;
+        int8_t *a = (int8_t *)psram_alloc(n), *r = (int8_t *)psram_alloc(n), *m = (int8_t *)psram_alloc(n);
+        int8_t *y0 = (int8_t *)psram_alloc(n), *y1 = (int8_t *)psram_alloc(n);
+        int8_t *sv = (int8_t *)psram_alloc(C);
+        for (size_t i = 0; i < n; i++) { a[i] = rnd8(); r[i] = rnd8(); }
+        for (int i = 0; i < C; i++) sv[i] = rnd8();
+        int64_t t0 = esp_timer_get_time();
+        if (c.mul) mmrt_mul_bcast_ref(a, c.T, C, sv, 0, 0, c.shift, m);
+        else memcpy(m, a, n);
+        if (c.add) mmrt_add_ref(m, r, (int)n, 0, 0, 0, y0);
+        else memcpy(y0, m, n);
+        for (size_t i = 0; i < n; i++) if (y0[i] < 0) y0[i] = 0;
+        int64_t t_ref = esp_timer_get_time() - t0;
+        t0 = esp_timer_get_time();
+        mmrt_s3_tail(a, c.mul ? sv : NULL, c.add ? r : NULL, c.T, C, c.shift, 1, y1);
+        int64_t t_s3 = esp_timer_get_time() - t0;
+        int bad = 0, first = -1;
+        for (size_t i = 0; i < n; i++)
+            if (y0[i] != y1[i]) { if (first < 0) first = (int)i; bad++; }
+        fails += bad > 0;
+        o.printf("{\"kernel\":\"tail\",\"T\":%d,\"shift\":%d,\"mul\":%d,\"add\":%d,\"bad\":%d,\"ref_us\":%lld,\"s3_us\":%lld}\n",
+                 c.T, c.shift, c.mul, c.add, bad, (long long)t_ref, (long long)t_s3);
+        if (first >= 0) o.printf("{\"at\":%d,\"ref\":%d,\"s3\":%d}\n", first, y0[first], y1[first]);
+        psram_free(a); psram_free(r); psram_free(m); psram_free(y0); psram_free(y1); psram_free(sv);
+    }
     return fails;
 }
 

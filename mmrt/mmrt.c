@@ -7,8 +7,12 @@
 #include <string.h>
 
 #include "mmrt_ref.h"
+#ifdef MMRT_S3
+#include "mmrt_s3.h"
+#endif
 
 mmrt_trace_fn mmrt_trace;
+int mmrt_use_ref;
 
 #define NONE16 0xffff
 
@@ -77,8 +81,15 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             mmrt_dwconv_ref(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
             break;
         case MMRT_CONV1X1:
-            mmrt_conv1x1_ref(x, Tx, Cx, w, op->b_off != 0xffffffffu ? (const int32_t *)(m->blob + op->b_off) : NULL,
-                             Cy, op->stride, op->shift, op->relu, y, Ty);
+        {
+            const int32_t *b = op->b_off != 0xffffffffu ? (const int32_t *)(m->blob + op->b_off) : NULL;
+#ifdef MMRT_S3
+            if (!mmrt_use_ref)
+                mmrt_s3_conv1x1(x, Tx, Cx, w, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+            else
+#endif
+                mmrt_conv1x1_ref(x, Tx, Cx, w, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+        }
             break;
         case MMRT_MEAN:
             mmrt_mean_ref(x, Tx, Cx, op->e_a, op->e_out, y);

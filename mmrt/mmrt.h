@@ -88,6 +88,9 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
 
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release);
 
+// 1 = use the portable reference ops even where an optimized kernel exists (A/B checks).
+extern int mmrt_use_ref;
+
 // Per-op hook, called after each op (NULL = none): lets a test compare every tensor.
 typedef void (*mmrt_trace_fn)(int op_index, const mmrt_op_t *op, const int8_t *out, int T, int C);
 extern mmrt_trace_fn mmrt_trace;

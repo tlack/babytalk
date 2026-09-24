@@ -52,7 +52,7 @@ def pad_decoder(w, bias, C):
     tail = np.zeros((C, 16), np.int8)
     tail[:, : N - na] = v[na * C:].reshape(N - na, C).T
     w_pad = np.concatenate([aligned, tail[None]], axis=0)
-    b_pad = np.full(align16(N), -(1 << 24), np.int32)  # saturates to -128 at any shift
+    b_pad = np.full(align16(N), -(1 << 19) + 1, np.int32)  # most negative 20-bit QACC lane value: saturates to -128
     assert not bias.value[N:].any()  # ESP-DL pads the stored bias (260 for 257)
     b_pad[:N] = bias.value[:N]
     return w_pad, b_pad, align16(N), N

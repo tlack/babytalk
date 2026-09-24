@@ -34,6 +34,8 @@
 #include "lwip/sockets.h"
 #include "mic.h"
 #include "mmrt.h"
+#include "mmrt_ref.h"
+#include "mmrt_s3.h"
 #include "nvs_flash.h"
 #include "stt_core.h"
 #include "wifi_secrets.h"
@@ -81,7 +83,7 @@ struct Out {
 };
 
 // ---------------------------------------------------------------- model
-static void *psram_alloc(size_t n) { return heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM); }
+static void *psram_alloc(size_t n) { return heap_caps_aligned_alloc(16, n ? n : 1, MALLOC_CAP_SPIRAM); }
 static void psram_free(void *p) { heap_caps_free(p); }
 
 static void heap_line(Out &o, const char *when)
@@ -301,6 +303,56 @@ static int cmd_listen(Out &o, int secs, bool trim, bool send_audio)
     return rc;
 }
 
+// ---------------------------------------------------------------- kernel tests
+static uint32_t s_rng = 12345;
+static int8_t rnd8(void)
+{
+    s_rng = s_rng * 1664525u + 1013904223u;
+    return (int8_t)(s_rng >> 24);
+}
+
+// Optimized kernel vs reference on random data, across the model's shapes.
+static int ktest(Out &o)
+{
+    struct { int C, N, T, stride, shift, relu, bias; } cases[] = {
+        {256, 256, 64, 1, 8, 1, 1}, {256, 256, 64, 1, 6, 0, 1}, {256, 256, 32, 2, 7, 0, 1},
+        {80, 256, 64, 1, 9, 1, 1},  {256, 32, 1, 1, 7, 1, 0},  {32, 256, 1, 1, 5, 0, 0},
+        {256, 640, 16, 1, 8, 1, 1}, {640, 272, 16, 1, 9, 0, 1}, {256, 256, 64, 1, 0, 0, 1},
+        {256, 256, 200, 1, 8, 1, 1},
+    };
+    int fails = 0;
+    for (auto &c : cases) {
+        size_t xn = (size_t)c.T * c.stride * c.C, wn = (size_t)c.C * c.N, yn = (size_t)c.T * c.N;
+        int8_t *x = (int8_t *)psram_alloc(xn), *w = (int8_t *)psram_alloc(wn);
+        int8_t *y0 = (int8_t *)psram_alloc(yn), *y1 = (int8_t *)psram_alloc(yn);
+        int32_t *b = (int32_t *)psram_alloc(c.N * 4);
+        for (size_t i = 0; i < xn; i++) x[i] = rnd8() >> 1;  // keep sums well inside 20 bits
+        for (size_t i = 0; i < wn; i++) w[i] = rnd8() >> 1;
+        for (int i = 0; i < c.N; i++) b[i] = (int32_t)(s_rng = s_rng * 1664525u + 1013904223u) >> 18;
+        int64_t t0 = esp_timer_get_time();
+        mmrt_conv1x1_ref(x, c.T * c.stride, c.C, w, c.bias ? b : NULL, c.N, c.stride, c.shift, c.relu, y0, c.T);
+        int64_t t_ref = esp_timer_get_time() - t0;
+        t0 = esp_timer_get_time();
+        mmrt_s3_conv1x1(x, c.T * c.stride, c.C, w, c.bias ? b : NULL, c.N, c.stride, c.shift, c.relu, y1, c.T);
+        int64_t t_s3 = esp_timer_get_time() - t0;
+        int bad = 0, first = -1;
+        for (size_t i = 0; i < yn; i++)
+            if (y0[i] != y1[i]) { if (first < 0) first = (int)i; bad++; }
+        fails += bad > 0;
+        double gmac = (double)c.T * c.C * c.N / (t_s3 > 0 ? t_s3 : 1) / 1000.0;
+        o.printf("{\"kernel\":\"conv1x1\",\"C\":%d,\"N\":%d,\"T\":%d,\"stride\":%d,\"shift\":%d,\"relu\":%d,"
+                 "\"bias\":%d,\"bad\":%d,\"first_bad\":%d,\"ref_us\":%lld,\"s3_us\":%lld,\"gmacs\":%.3f,"
+                 "\"speedup\":%.1f%s}\n",
+                 c.C, c.N, c.T, c.stride, c.shift, c.relu, c.bias, bad, first, (long long)t_ref, (long long)t_s3,
+                 gmac, (double)t_ref / (t_s3 > 0 ? t_s3 : 1),
+                 first >= 0 ? "" : "");
+        if (first >= 0)
+            o.printf("{\"at\":%d,\"ref\":%d,\"s3\":%d}\n", first, y0[first], y1[first]);
+        psram_free(x); psram_free(w); psram_free(y0); psram_free(y1); psram_free(b);
+    }
+    return fails;
+}
+
 static int handle(Out &o, char *line)
 {
     char *argv[6] = {};
@@ -310,6 +362,17 @@ static int handle(Out &o, char *line)
     int a1 = argc > 1 ? atoi(argv[1]) : 0;
     if (load_model(o)) return 1;
 
+    if (!strcmp(argv[0], "ktest")) return ktest(o);
+    if (!strcmp(argv[0], "ref")) {  // ref 1: portable C ops everywhere (A/B)
+        mmrt_use_ref = a1;
+        o.printf("{\"use_ref\":%d}\n", a1);
+        return 0;
+    }
+    if (!strcmp(argv[0], "stage")) {  // stage 0|1: SRAM-stage 1x1 weights
+        mmrt_s3_stage = a1;
+        o.printf("{\"stage\":%d}\n", a1);
+        return 0;
+    }
     if (!strcmp(argv[0], "info")) {
         heap_line(o, "now");
         return 0;

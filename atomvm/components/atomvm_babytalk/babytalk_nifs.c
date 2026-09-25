@@ -9,6 +9,8 @@
 //   babytalk:stop_listening() -> ok
 //   babytalk:play_nif(Pcm16Mono, Rate, Volume) -> {ok, Ref} | {error, busy}
 //       then {babytalk_play, Ref, done | {error, Code}} (ES8311 + NS4150B speaker)
+//   babytalk:tones_nif([{Hz, Ms}], Volume) -> {ok, Ref} | {error, busy}   (same messages as play)
+//   babytalk:rms(Pcm16Mono) -> Integer
 //   babytalk:say_nif(Text) -> {ok, Ref} | {error, busy}
 //       then {babytalk, Ref, {ok, Pcm24kMono, Info} | {error, Code}} (sanoTTS)
 //   babytalk:phrase(Spellings) -> {ok, Sequences} | {error, busy | no_memory}
@@ -22,6 +24,7 @@
 #ifdef CONFIG_AVM_ENABLE_BABYTALK_NIFS
 
 #include <stdatomic.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -388,6 +391,23 @@ static term nif_listen(Context *ctx, int argc, term argv[])
     return t;
 }
 
+// Hand PCM (PSRAM, ours to free) to the audio task, whose claim the caller holds -> {ok, Ref}
+static term start_play(Context *ctx, int16_t *pcm, int n, int rate, int volume)
+{
+    s_aj.kind = AUDIO_PLAY;
+    s_aj.pid = ctx->process_id;
+    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.pcm = pcm;
+    s_aj.n = n;
+    s_aj.rate = rate;
+    s_aj.volume = volume;
+    xSemaphoreGive(s_audio_go);
+    term t = term_alloc_tuple(2, &ctx->heap);
+    term_put_tuple_element(t, 0, OK_ATOM);
+    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
+    return t;
+}
+
 // play_nif(Pcm16Mono, Rate, Volume) -> {ok, Ref}: then {babytalk_play, Ref, done | {error, Code}}
 static term nif_play(Context *ctx, int argc, term argv[])
 {
@@ -407,18 +427,71 @@ static term nif_play(Context *ctx, int argc, term argv[])
         return error_tuple(&ctx->heap, atom(ctx->global, A_NO_MEMORY));
     }
     memcpy(pcm, term_binary_data(argv[0]), bytes);
-    s_aj.kind = AUDIO_PLAY;
-    s_aj.pid = ctx->process_id;
-    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
-    s_aj.pcm = pcm;
-    s_aj.n = (int) (bytes / 2);
-    s_aj.rate = (int) rate;
-    s_aj.volume = (int) vol;
-    xSemaphoreGive(s_audio_go);
-    term t = term_alloc_tuple(2, &ctx->heap);
-    term_put_tuple_element(t, 0, OK_ATOM);
-    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
-    return t;
+    return start_play(ctx, pcm, (int) (bytes / 2), (int) rate, (int) vol);
+}
+
+#define TONE_RATE 24000
+#define TONE_MAX_NOTES 16
+#define TONE_MAX_MS 3000
+
+// tones_nif([{Hz, Ms}], Volume) -> {ok, Ref}: then {babytalk_play, Ref, done | {error, Code}}.
+// Soft sine notes (a third of full scale, 8 ms raised-cosine fades so nothing clicks);
+// Hz 0 is a rest. Made here: building PCM element by element in Erlang is slow on AtomVM.
+static term nif_tones(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+    VALIDATE_VALUE(argv[0], term_is_list);
+    VALIDATE_VALUE(argv[1], term_is_integer);
+    const avm_int_t vol = term_to_int(argv[1]);
+    int hz[TONE_MAX_NOTES], ms[TONE_MAX_NOTES], n = 0, total_ms = 0;
+    for (term l = argv[0]; term_is_nonempty_list(l); l = term_get_list_tail(l)) {
+        term t = term_get_list_head(l);
+        if (n == TONE_MAX_NOTES || !term_is_tuple(t) || term_get_tuple_arity(t) != 2
+            || !term_is_integer(term_get_tuple_element(t, 0)) || !term_is_integer(term_get_tuple_element(t, 1))) {
+            RAISE_ERROR(BADARG_ATOM);
+        }
+        hz[n] = (int) term_to_int(term_get_tuple_element(t, 0));
+        ms[n] = (int) term_to_int(term_get_tuple_element(t, 1));
+        if (hz[n] < 0 || hz[n] > 8000 || ms[n] < 1) RAISE_ERROR(BADARG_ATOM);
+        total_ms += ms[n++];
+    }
+    if (n == 0 || total_ms > TONE_MAX_MS || vol < 0 || vol > 100) RAISE_ERROR(BADARG_ATOM);
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_SIZE) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
+    const int samples = total_ms * TONE_RATE / 1000;
+    int16_t *pcm = heap_caps_malloc((size_t) samples * 2, MALLOC_CAP_SPIRAM);
+    if (!pcm) {
+        atomic_store(&s_audio_claimed, 0);
+        return error_tuple(&ctx->heap, atom(ctx->global, A_NO_MEMORY));
+    }
+    const int fade = TONE_RATE * 8 / 1000;
+    int16_t *p = pcm;
+    for (int k = 0; k < n; k++) {
+        const int len = ms[k] * TONE_RATE / 1000;
+        const float w = 2.0f * (float) M_PI * (float) hz[k] / TONE_RATE;
+        for (int i = 0; i < len; i++) {
+            float g = 1.0f;
+            int edge = i < len - 1 - i ? i : len - 1 - i;
+            if (edge < fade) g = 0.5f - 0.5f * cosf((float) M_PI * (float) edge / (float) fade);
+            *p++ = hz[k] ? (int16_t) (10900.0f * g * sinf(w * (float) i)) : 0;
+        }
+    }
+    return start_play(ctx, pcm, (int) (p - pcm), TONE_RATE, (int) vol);
+}
+
+// rms(Pcm16Mono) -> Integer: root mean square level (0..32768), e.g. to tell speech from silence
+static term nif_rms(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+    VALIDATE_VALUE(argv[0], term_is_binary);
+    const size_t n = term_binary_size(argv[0]) / 2;
+    const uint8_t *b = (const uint8_t *) term_binary_data(argv[0]);
+    int64_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        int32_t v = (int16_t) (b[2 * i] | (b[2 * i + 1] << 8));
+        sum += v * v;
+    }
+    return term_from_int(n ? (avm_int_t) sqrtf((float) sum / (float) n) : 0);
 }
 
 // say_nif(Text) -> {ok, Ref}: then {babytalk, Ref, {ok, Pcm24k, Info} | {error, Code}}
@@ -558,6 +631,8 @@ static term nif_heap_info(Context *ctx, int argc, term argv[])
 NIF(transcribe, nif_transcribe);
 NIF(listen, nif_listen);
 NIF(play, nif_play);
+NIF(tones, nif_tones);
+NIF(rms, nif_rms);
 NIF(say, nif_say);
 NIF(stop_listening, nif_stop_listening);
 NIF(phrase, nif_phrase);
@@ -569,7 +644,8 @@ static const struct {
     const char *name;  // "fun/arity"
     const struct Nif *nif;
 } NIFS[] = {
-    {"transcribe_nif/1", &transcribe_nif}, {"listen_nif/1", &listen_nif}, {"play_nif/3", &play_nif}, {"say_nif/1", &say_nif},
+    {"transcribe_nif/1", &transcribe_nif}, {"listen_nif/1", &listen_nif}, {"play_nif/3", &play_nif},
+    {"tones_nif/2", &tones_nif}, {"rms/1", &rms_nif}, {"say_nif/1", &say_nif},
     {"stop_listening/0", &stop_listening_nif}, {"phrase/1", &phrase_nif}, {"cache/1", &cache_nif},
     {"info/0", &info_nif}, {"heap_info/0", &heap_info_nif},
 };

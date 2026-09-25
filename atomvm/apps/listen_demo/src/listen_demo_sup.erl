@@ -12,7 +12,7 @@
 start_link() -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    Listener = #{spellings => ?SPELLINGS, threshold => -21.0, notify => listen_demo_printer},
+    Listener = #{spellings => ?SPELLINGS, threshold => -21.0, notify => listen_demo_responder},
     {ok, {#{strategy => rest_for_one, intensity => 5, period => 60},
-          [#{id => printer, start => {listen_demo_printer, start_link, []}},
+          [#{id => responder, start => {listen_demo_responder, start_link, []}},
            #{id => listener, start => {babytalk_listener, start_link, [babytalk_listener, Listener]}}]}}.

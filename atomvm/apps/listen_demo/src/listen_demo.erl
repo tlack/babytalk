@@ -1,8 +1,8 @@
-%% Say "wake up tomato face", then a command: the board prints what it heard. All on the
+%% Say "wake up tomato face", then a command: the board says what it heard. All on the
 %% ESP32-S3, in Erlang on AtomVM: the microphone streams while transcriptions run.
 %%
 %%   listen_demo_sup (rest_for_one)
-%%   |-- listen_demo_printer   prints the listener's events
+%%   |-- listen_demo_responder prints events, answers commands out loud
 %%   `-- babytalk_listener     mic -> wake phrase -> command transcript
 -module(listen_demo).
 -export([start/0]).

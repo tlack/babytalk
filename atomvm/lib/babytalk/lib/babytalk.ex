@@ -14,6 +14,8 @@ defmodule BabyTalk do
   defdelegate say_sync(text, timeout), to: :babytalk
   defdelegate play(pcm, rate), to: :babytalk
   defdelegate play(pcm, rate, volume), to: :babytalk
+  defdelegate tones(notes, volume), to: :babytalk
+  defdelegate rms(pcm), to: :babytalk
   defdelegate speak(text), to: :babytalk
   defdelegate speak(text, volume), to: :babytalk
   defdelegate phrase(spellings), to: :babytalk

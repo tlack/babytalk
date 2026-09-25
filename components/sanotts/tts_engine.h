@@ -32,6 +32,10 @@ void tts_release(void);
 // else the synthesizer's error code.
 int tts_say(const char *text, float volume, int16_t **pcm, int *n, tts_stats_t *st);
 
+// Speaking pace for the next tts_say calls: every phoneme's duration is multiplied by
+// `scale` (1.0 = the voice's own pace, 1.1 = 10% slower; clamped to 0.5..2.0).
+void tts_set_length_scale(float scale);
+
 #ifdef __cplusplus
 }
 #endif

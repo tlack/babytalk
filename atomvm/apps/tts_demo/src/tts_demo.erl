@@ -10,7 +10,7 @@
 
 start() ->
     io:format("tts_demo: ~p~n", [babytalk:heap_info()]),
-    loop(3).
+    loop(1).
 
 %% a few rounds, with pauses: time to film it
 loop(0) -> io:format("tts_demo done ~p~n", [babytalk:heap_info()]), timer:sleep(infinity);
@@ -18,7 +18,7 @@ loop(N) -> lists:foreach(fun say/1, ?TEXTS), timer:sleep(3000), loop(N - 1).
 
 say(Text) ->
     T0 = erlang:monotonic_time(millisecond),
-    {ok, Pcm, Info} = babytalk:say_sync(Text, 30000),
+    {ok, Pcm, Info} = babytalk:say_sync(Text, #{length_scale => 1.10}, 30000),
     Ms = erlang:monotonic_time(millisecond) - T0,
     Secs = byte_size(Pcm) / 2 / proplists:get_value(rate, Info),
     io:format("~s~n  ~.2f s of speech in ~p ms (RTF ~.2f) ~p~n  sha256 ~s~n",

@@ -22,7 +22,8 @@
 %% Options (map): notify (required); spellings ([binary()], [] = no wake phrase);
 %% threshold (-21.0, from export/kws.py); window_ms (4000) and every_ms (1000) for wake
 %% scoring; silence_ms (700) of quiet that ends a message, max_message_ms (6000);
-%% reply_ms (1500); chunk_ms (125); cues (true); cue_volume (70).
+%% reply_ms (1500); chunk_ms (125); cues (true); cue_volume (70); voice_volume (76);
+%% length_scale (1.10: speech 10% slower than the voice's own pace, easier to follow).
 -module(babytalk_listener).
 -behaviour(gen_server).
 -export([start_link/1, start_link/2, stop/1, say/2]).
@@ -55,7 +56,8 @@ say(Server, Text) -> gen_server:cast(Server, {say, iolist_to_binary(Text)}).
 init(Opts0) ->
     Opts = maps:merge(#{spellings => [], threshold => -21.0, window_ms => 4000, every_ms => 1000,
                         silence_ms => 700, max_message_ms => 6000, reply_ms => 1500,
-                        chunk_ms => 125, cues => true, cue_volume => 70}, Opts0),
+                        chunk_ms => 125, cues => true, cue_volume => 70, voice_volume => 76,
+                        length_scale => 1.10}, Opts0),
     {ok, Seqs} = babytalk:phrase(maps:get(spellings, Opts)),
     true = Seqs > 0 orelse maps:get(spellings, Opts) =:= [],
     {ok, output([cue(ready)], wake, #st{opts = Opts})}.
@@ -95,7 +97,7 @@ handle_info(retry_decode, #st{decoding = {pending, Pcm}} = St) ->
 handle_info({babytalk, Ref, Result}, #st{out_ref = {say, Ref, {say, Text}}} = St) ->
     case Result of
         {ok, Pcm, Info} ->
-            {ok, P} = babytalk:play(Pcm, proplists:get_value(rate, Info)),
+            {ok, P} = babytalk:play(Pcm, proplists:get_value(rate, Info), maps:get(voice_volume, St#st.opts)),
             {noreply, St#st{out_ref = {play, P, {say, Text}}}};
         {error, E} ->
             notify(St, {say_error, E}),
@@ -144,7 +146,7 @@ pump(#st{out = [], then = Then} = St) -> enter(Then, St);
 pump(#st{out = [Item | Rest], opts = Opts} = St) ->
     Started = case Item of
                   {cue, Name} -> {play, babytalk:tones(maps:get(Name, ?CUES), maps:get(cue_volume, Opts))};
-                  {say, Text} -> {say, babytalk:say(Text)}
+                  {say, Text} -> {say, babytalk:say(Text, #{length_scale => maps:get(length_scale, Opts)})}
               end,
     case Started of
         {Kind, {ok, Ref}} -> St#st{out = Rest, out_ref = {Kind, Ref, Item}};

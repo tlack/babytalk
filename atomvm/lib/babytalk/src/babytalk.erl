@@ -6,11 +6,11 @@
 %% the result arrives as a message. One transcription at a time: others get {error, busy}.
 -module(babytalk).
 -export([transcribe/1, transcribe_sync/2, listen/1, stop_listening/0, record/1,
-         say/1, say_sync/2, play/2, play/3, tones/2, rms/1, speak/1, speak/2,
+         say/1, say/2, say_sync/2, say_sync/3, play/2, play/3, tones/2, rms/1, speak/1, speak/2,
          phrase/1, cache/1, info/0, heap_info/0]).
 %% AtomVM binds NIFs only to external calls (Module:Fun), so NIFs wrapped here are exported
 %% and called as ?MODULE:name_nif(...).
--export([transcribe_nif/1, listen_nif/1, say_nif/1, play_nif/3, tones_nif/2]).
+-export([transcribe_nif/1, listen_nif/1, say_nif/2, play_nif/3, tones_nif/2]).
 
 -type info() :: [{score, float() | undefined} | {span, {integer(), integer()}} | {frames, integer()}
                  | {fe_ms | model_ms | dec_ms, float()}].
@@ -84,24 +84,30 @@ drain(Ref) ->
 %%   {babytalk, Ref, {ok, Pcm24k :: binary(), Info} | {error, Code}}
 %% with 24 kHz mono PCM and Info = [{rate, 24000}, {phonemes, N}, {g2p_ms, F}, {synth_ms, F}].
 %% Shares the engine with transcription: one at a time ({error, busy}).
+%% Options: length_scale (1.0 = the voice's own pace; 1.1 = 10% slower, 0.5..2.0).
 -spec say(iodata()) -> {ok, reference()} | {error, busy}.
-say(Text) -> ?MODULE:say_nif(Text).
+say(Text) -> say(Text, #{}).
+-spec say(iodata(), #{length_scale => float()}) -> {ok, reference()} | {error, busy}.
+say(Text, Opts) -> ?MODULE:say_nif(Text, round(maps:get(length_scale, Opts, 1.0) * 1000)).
 
-say_nif(_Text) -> erlang:nif_error(undefined).
+say_nif(_Text, _LengthPermille) -> erlang:nif_error(undefined).
 
 -spec say_sync(iodata(), timeout()) -> {ok, binary(), list()} | {error, term()}.
-say_sync(Text, Timeout) ->
-    case say(Text) of
+say_sync(Text, Timeout) -> say_sync(Text, #{}, Timeout).
+-spec say_sync(iodata(), map(), timeout()) -> {ok, binary(), list()} | {error, term()}.
+say_sync(Text, Opts, Timeout) ->
+    case say(Text, Opts) of
         {ok, Ref} -> receive {babytalk, Ref, R} -> R after Timeout -> {error, timeout} end;
         Error -> Error
     end.
 
 %% Play mono PCM at Rate Hz on the speaker (Waveshare S3-CAM: ES8311 + NS4150B), Volume
-%% 0..100 (DAC; 75 = 0 dB, default 85). Returns at once; then {babytalk_play, Ref, done |
+%% 0..100 (DAC; 75 = 0 dB, each step ~0.5 dB; default 76 -- the speech peaks at 77% of full
+%% scale, so much above ~80 clips in the DAC). Returns at once; then {babytalk_play, Ref, done |
 %% {error, Code}}. The speaker and the microphone share one I2S port: {error, busy} while
 %% listening (and listen/1 while playing).
 -spec play(binary(), pos_integer()) -> {ok, reference()} | {error, busy | no_memory}.
-play(Pcm, Rate) -> play(Pcm, Rate, 85).
+play(Pcm, Rate) -> play(Pcm, Rate, 76).
 -spec play(binary(), pos_integer(), 0..100) -> {ok, reference()} | {error, busy | no_memory}.
 play(Pcm, Rate, Volume) -> ?MODULE:play_nif(Pcm, Rate, Volume).
 
@@ -120,7 +126,7 @@ rms(_Pcm) -> erlang:nif_error(undefined).
 
 %% say + play, waiting for both: the board says Text out loud.
 -spec speak(iodata()) -> ok | {error, term()}.
-speak(Text) -> speak(Text, 85).
+speak(Text) -> speak(Text, 76).
 -spec speak(iodata(), 0..100) -> ok | {error, term()}.
 speak(Text, Volume) ->
     case say_sync(Text, 30000) of

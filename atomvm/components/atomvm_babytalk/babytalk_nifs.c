@@ -11,7 +11,7 @@
 //       then {babytalk_play, Ref, done | {error, Code}} (ES8311 + NS4150B speaker)
 //   babytalk:tones_nif([{Hz, Ms}], Volume) -> {ok, Ref} | {error, busy}   (same messages as play)
 //   babytalk:rms(Pcm16Mono) -> Integer
-//   babytalk:say_nif(Text) -> {ok, Ref} | {error, busy}
+//   babytalk:say_nif(Text, LengthPermille) -> {ok, Ref} | {error, busy}
 //       then {babytalk, Ref, {ok, Pcm24kMono, Info} | {error, Code}} (sanoTTS)
 //   babytalk:phrase(Spellings) -> {ok, Sequences} | {error, busy | no_memory}
 //   babytalk:cache(Bytes) -> {ok, Cached} | {error, busy | Code}
@@ -101,6 +101,7 @@ typedef struct {
     int16_t *pcm;  // JOB_STT: PSRAM copy of the audio, freed by the worker
     int n;
     char *text;    // JOB_TTS: copy of the text, freed by the worker
+    int length_permille;  // JOB_TTS: pace (1000 = the voice's own)
     int32_t pid;
     uint64_t ref;
 } job_t;
@@ -194,6 +195,7 @@ static void do_say(const job_t *j)
     int16_t *pcm;
     int n;
     tts_stats_t st;
+    tts_set_length_scale(j->length_permille / 1000.0f);
     int rc = tts_say(j->text, 0.77f, &pcm, &n, &st);  // peak at 77% of full scale, as mpy's echo
     free(j->text);
     unlock_engine();
@@ -360,7 +362,7 @@ static term nif_transcribe(Context *ctx, int argc, term argv[])
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
     if (!lock_engine()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
-    job_t j = {JOB_STT, heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), (int) (bytes / 2), NULL, ctx->process_id,
+    job_t j = {JOB_STT, heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), (int) (bytes / 2), NULL, 1000, ctx->process_id,
                globalcontext_get_ref_ticks(ctx->global)};
     if (!j.pcm) {
         unlock_engine();
@@ -494,10 +496,13 @@ static term nif_rms(Context *ctx, int argc, term argv[])
     return term_from_int(n ? (avm_int_t) sqrtf((float) sum / (float) n) : 0);
 }
 
-// say_nif(Text) -> {ok, Ref}: then {babytalk, Ref, {ok, Pcm24k, Info} | {error, Code}}
+// say_nif(Text, LengthPermille) -> {ok, Ref}: then {babytalk, Ref, {ok, Pcm24k, Info} | {error, Code}}
 static term nif_say(Context *ctx, int argc, term argv[])
 {
     UNUSED(argc);
+    VALIDATE_VALUE(argv[1], term_is_integer);
+    const avm_int_t pace = term_to_int(argv[1]);
+    if (pace < 500 || pace > 2000) RAISE_ERROR(BADARG_ATOM);
     int ok = 0;
     char *text = interop_term_to_string(argv[0], &ok);  // binary, string or iolist
     if (!ok || !text) {
@@ -512,7 +517,7 @@ static term nif_say(Context *ctx, int argc, term argv[])
         free(text);
         return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
     }
-    job_t j = {JOB_TTS, NULL, 0, text, ctx->process_id, globalcontext_get_ref_ticks(ctx->global)};
+    job_t j = {JOB_TTS, NULL, 0, text, (int) pace, ctx->process_id, globalcontext_get_ref_ticks(ctx->global)};
     return submit(ctx, &j);
 }
 
@@ -645,7 +650,7 @@ static const struct {
     const struct Nif *nif;
 } NIFS[] = {
     {"transcribe_nif/1", &transcribe_nif}, {"listen_nif/1", &listen_nif}, {"play_nif/3", &play_nif},
-    {"tones_nif/2", &tones_nif}, {"rms/1", &rms_nif}, {"say_nif/1", &say_nif},
+    {"tones_nif/2", &tones_nif}, {"rms/1", &rms_nif}, {"say_nif/2", &say_nif},
     {"stop_listening/0", &stop_listening_nif}, {"phrase/1", &phrase_nif}, {"cache/1", &cache_nif},
     {"info/0", &info_nif}, {"heap_info/0", &heap_info_nif},
 };

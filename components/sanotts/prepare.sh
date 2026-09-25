@@ -9,3 +9,6 @@ SRC="$1/esphome/components/sanotts"
 rm -rf "$2" && cp -r "$SRC" "$2"
 sed -i 's/^static NanoScratch g_scr\[2\];/static NanoScratch g_scr[1];/' "$2/snt_nano.c"
 grep -q 'g_scr\[1\]' "$2/snt_nano.c"
+# speaking pace as a runtime setting (tts_set_length_scale) instead of the constant 1.0
+sed -i 's|^#define LENGTH_SCALE 1.0f .*|float snt_length_scale = 1.0f;  /* BabyTalk: runtime pace */\n#define LENGTH_SCALE snt_length_scale|' "$2/snt_nano.c"
+grep -q '^float snt_length_scale' "$2/snt_nano.c"

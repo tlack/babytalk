@@ -53,6 +53,13 @@ static int on_pcm(const float *pcm, int n, void *user)
 _Static_assert(ARENA_BYTES <= SRAM_POOL_BYTES, "arena must fit the shared SRAM pool");
 
 // The arena is the shared internal SRAM pool (sram_pool.h), held only during tts_say().
+extern float snt_length_scale;  // snt_nano.c, made a variable by prepare.sh
+
+void tts_set_length_scale(float scale)
+{
+    snt_length_scale = scale < 0.5f ? 0.5f : (scale > 2.0f ? 2.0f : scale);
+}
+
 int tts_reserve(void) { return sram_pool_reserve() ? -2 : 0; }
 
 void tts_release(void) { sram_pool_release(POOL_OWNER_TTS); }

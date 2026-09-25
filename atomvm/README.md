@@ -69,7 +69,8 @@ supervision, state and policy are Erlang.
   | idle | *decoding* (G5 -> C5) | transcribes, reports `{command, Text}`, speaks any reply, then *ready* again |
 
   Replies go through `babytalk_listener:say/2`, which pauses the mic while speaking (so it
-  doesn't hear itself). Events to the subscriber: `{heard, Text, Score}`, `{wake, Text,
+  doesn't hear itself); they are spoken 10% slower than the voice's own pace
+  (`length_scale`), which is easier to follow. Events to the subscriber: `{heard, Text, Score}`, `{wake, Text,
   Score}`, `{message_end, silence | max_length, Levels}`, `{command, Text}`, `{said, Text}`.
   Put it under a supervisor: if the mic or engine fails it crashes, and the restart
   re-opens everything.
@@ -116,8 +117,8 @@ runs on the calling scheduler and is capped at 4M multiply-adds (`error(too_big)
 | `transcribe_sync(Pcm, Timeout)` | `{ok, Text, Info}` |
 | `listen(ChunkMs)` / `stop_listening()` | mic stream, see above |
 | `record(Secs)` | `{ok, Pcm}` |
-| `say(Text)` / `say_sync(Text, Timeout)` | `{ok, Ref}`, then `{babytalk, Ref, {ok, Pcm24k, Info}}` (sanoTTS, 24 kHz) |
-| `play(Pcm, Rate[, Volume])` | `{ok, Ref}`, then `{babytalk_play, Ref, done}` |
+| `say(Text[, #{length_scale => S}])` / `say_sync(...)` | `{ok, Ref}`, then `{babytalk, Ref, {ok, Pcm24k, Info}}` (sanoTTS, 24 kHz; S 1.0 = the voice's pace, 1.1 = 10% slower) |
+| `play(Pcm, Rate[, Volume])` | `{ok, Ref}`, then `{babytalk_play, Ref, done}`; Volume 0..100 (DAC, 75 = 0 dB, default 76: much above ~80 the speech clips) |
 | `tones([{Hz, Ms}], Volume)` | chimes made on the board, played like `play` |
 | `speak(Text[, Volume])` | `ok` once said out loud (say + play) |
 | `rms(Pcm)` | loudness 0..32768 |

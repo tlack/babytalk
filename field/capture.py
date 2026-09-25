@@ -52,7 +52,7 @@ BOARD_FILES = {
 }
 RATE = 16000
 BUCKET_ORDER = [1, 4, 8, 12, 20]
-SOURCES = ["librispeech", "news", "wikipedia", "terms", "hardwords"]
+SOURCES = ["librispeech", "news", "wikipedia", "terms", "hardwords", "hackernews"]
 HARD = DATA / "hard_words.json"
 BOLD, DIM, RED, GREEN, YEL, RESET = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 
@@ -179,6 +179,27 @@ def load_prompts():
     return [json.loads(l) for l in open(PROMPTS)]
 
 
+def shingles(ref, n=6):
+    w = ref.split()
+    return {" ".join(w[i:i + n]) for i in range(max(1, len(w) - n + 1))}
+
+
+def recorded_shingles():
+    """6-word stretches of every recorded prompt: a prompt sharing one is a near-repeat."""
+    if not MANIFEST.exists():
+        return set()
+    out = set()
+    for l in open(MANIFEST):
+        out |= shingles(json.loads(l)["ref"])
+    return out
+
+
+def fresh_only(prompts):
+    """Drop prompts already recorded or overlapping recorded text (same article sentences)."""
+    done, seen = recorded_ids(), recorded_shingles()
+    return [p for p in prompts if p["id"] not in done and not (shingles(p["ref"]) & seen)]
+
+
 def recorded_ids():
     if not MANIFEST.exists():
         return set()
@@ -193,8 +214,7 @@ def picker(prompts, seed, sources=None):
     prompts = [p for p in prompts if p["source"] in srcs]
     if not prompts:
         sys.exit(f"no prompts from sources {sources}")
-    done = recorded_ids()
-    fresh = [p for p in prompts if p["id"] not in done] or prompts
+    fresh = fresh_only(prompts) or prompts
     i = 0
     while True:
         b = BUCKET_ORDER[i % len(BUCKET_ORDER)]
@@ -202,7 +222,8 @@ def picker(prompts, seed, sources=None):
         pool = [p for p in fresh if p["bucket"] == b and p["source"] == src] or \
                [p for p in fresh if p["bucket"] == b] or fresh
         p = rng.choice(pool)
-        fresh = [q for q in fresh if q["id"] != p["id"]] or prompts
+        sh = shingles(p["ref"])                           # no overlapping text within a session
+        fresh = [q for q in fresh if q["id"] != p["id"] and not (shingles(q["ref"]) & sh)] or prompts
         i += 1
         yield p
 
@@ -241,17 +262,23 @@ def hard_picker(prompts):
     """Prompts containing problem words (not recorded yet first), most problem words first."""
     _, words = hard_list()
     ws = set(words)
-    done = recorded_ids()
-    scored = [(len(ws & set(p["ref"].split())), p["id"] not in done, p) for p in prompts]
+    fresh = {p["id"] for p in fresh_only(prompts)}
+    scored = [(len(ws & set(p["ref"].split())), p["id"] in fresh, p) for p in prompts]
     scored = [x for x in scored if x[0]]
     # unrecorded first, then the most problem words per spoken word (short, targeted sentences)
     scored.sort(key=lambda x: (not x[1], -x[0] / (5 + x[2]["words"])))
     if not scored:
         sys.exit("no prompts contain problem words: try `uv run prompts.py --hard`")
-    print(f"{DIM}{len(scored)} prompts contain problem words{RESET}")
+    print(f"{DIM}{len(scored)} prompts contain problem words ({sum(x[1] for x in scored)} new){RESET}")
+    used = set()
     while True:
         for _, _, p in scored:
+            sh = shingles(p["ref"])
+            if sh & used:                                   # overlaps something this session
+                continue
+            used |= sh
             yield p
+        used = set()
 
 
 def est_secs(p):
@@ -370,6 +397,7 @@ def save(sdir, n, speaker, pcm, p, meta, lv, **extra):
     append(MANIFEST, {"id": f"{meta['session']}/{n:02d}", "file": str((sdir / name).relative_to(DATA)),
                       "speaker": speaker, "prompt_id": p["id"], "ref": p["ref"], "display": p["display"],
                       "source": p["source"], "bucket": p["bucket"], "split": p["split"],
+                      **({"loose": True} if p.get("loose") else {}),
                       "secs": round(len(pcm) / RATE, 2), **lv, **extra,
                       **{k: meta[k] for k in ("session", "condition", "noise", "distance_m", "speaker_distance_m",
                                               "board", "mic", "gain", "noise_dbfs")}})

@@ -153,7 +153,8 @@ def main():
     ap.add_argument("--legacy", action="store_true", help="also score data/recordings")
     ap.add_argument("--models", nargs="*", default=["float", "int8", "int4"])
     ap.add_argument("--mmrt", nargs="*", default=[], help="extra .mmrt files to score")
-    ap.add_argument("--float-ckpt", help="fine-tuned float weights (state_dict) to score as 'float-ft'")
+    ap.add_argument("--float-ckpt", nargs="*", default=[],
+                    help="fine-tuned float weights (state_dicts); each is scored under its file name")
     ap.add_argument("-j", type=int, default=16)
     a = ap.parse_args()
 
@@ -164,8 +165,8 @@ def main():
     hyps = {}
     if "float" in a.models:
         hyps["float"] = run_float(items)
-    if a.float_ckpt:
-        hyps["float-ft"] = run_float(items, a.float_ckpt)
+    for ck in a.float_ckpt:
+        hyps[Path(ck).stem] = run_float(items, ck)
     for name in [m for m in a.models if m in MODELS]:
         hyps[name] = run_mmrt(MODELS[name], items, a.j)
     for p in a.mmrt:
@@ -176,6 +177,9 @@ def main():
     for key, fmt in (("condition", "{}"), ("who", "speaker {}"), ("bucket", "~{} s clips"), ("source", "{} text")):
         for i, r in enumerate(items):
             groups.setdefault(fmt.format(r.get(key)), []).append(i)
+    loose = [i for i, r in enumerate(items) if r.get("loose")]
+    if loose:                                   # tech tokens whose reading is a best guess
+        groups["loose refs (x86, 4K, ...)"] = loose
     names = list(hyps)
     print(f"\nword error rate (%), {len(items)} clips, split={a.split}\n")
     print(f"| group | clips | " + " | ".join(names) + " |")

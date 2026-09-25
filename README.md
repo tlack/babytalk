@@ -254,10 +254,57 @@ uv run int4_gptq.py --keep-io                                                   
 uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o ../data/models/mmrt/citrinet256_int4.mmrt
 ```
 
+## Training for the real world (work in progress)
+
+The speech model learned from clean audiobooks. At a desk it does well, but with an engine,
+music or people talking in the background, it falls apart: on our recordings over a diesel
+truck idling, even the full-precision model got about half the words wrong. So we record
+real-world audio on the board itself and fine-tune the model on it.
+
+**Recording** (`field/`): a session plays a background sound (a TV, a coffee-shop loop, a
+truck engine, or the real thing) and shows sentences on screen. You read each one aloud,
+then the laptop reads the same sentence in one of ~35 synthetic voices at a random speed,
+and the board records both over WiFi. Sentences come from audiobooks, today's news,
+popular Wikipedia articles, Hacker News headlines, and your own list of words
+(`field/terms.txt`: names, commands, jargon). Background-only recordings are saved too,
+for mixing into training.
+
+**Measuring** (`export/field_eval.py`): one command scores every model on the recordings.
+A fifth of the sentences are reserved for testing and never used in training.
+`export/hard_words.py` keeps a running list of the words the model gets wrong, and the
+recorder can target them (`--hard`) or redo the sentences it missed (`--retake`).
+
+**Training** (`train/finetune.py`, ~15 minutes on a laptop GPU): the model keeps learning
+from 100 hours of audiobooks, plus synthetic speech of modern text and the field
+recordings, with the recorded background noise and other damage (muffling, clipping,
+dropouts) mixed in. Blending the fine-tuned weights with the original ones lets us choose
+how much clean-speech accuracy to keep.
+
+First results, on 120 recordings none of the models had heard (a new noise, and 30 clips
+of a real person reading), word error rate:
+
+| model (full precision) | new recordings | clean audiobooks |
+|---|---|---|
+| original | 46% | 3.9% |
+| fine-tuned, blended 70% with the original | 25% | 4.9% |
+| fine-tuned | 24% | 6.2% |
+
+So far this is the full-precision model on the PC. The int8 and int4 versions for the board
+still need to be rebuilt from it.
+
+```bash
+cd field && uv run prompts.py                                   # build the sentence pool
+uv run capture.py --condition truck-idle --noise "diesel idling"   # a recording session
+cd ../export && uv run field_eval.py --split all                # score the models
+cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune on the GPU
+```
+
 ## Limitations
 
 - English only, 16 kHz audio. Transcription starts after you stop talking (no live
   streaming), and it is best with one speaker at a time close to the mic.
+- The models on the board are still the original ones, which struggle with loud background
+  noise; the fine-tuned model (above) isn't quantized for the board yet.
 - The int4 model trades ~2 points of accuracy for size (see the table above).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
 - Tested on one board. Another ESP32-S3 board needs its own pins and audio codec driver.
@@ -265,7 +312,9 @@ uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o ../data
 
 ## Future work
 
-- Recover the int4 accuracy loss by fine-tuning with 4-bit weights in place.
+- Rebuild the board's int8 and int4 models from the fine-tuned model, then train with the
+  8- and 4-bit arithmetic simulated (quantization-aware training) to recover their losses.
+- Record in a real vehicle, and on the target device (a LilyGO T-Watch S3 Plus).
 - Transcribe while you are still talking (streaming).
 - A better voice: larger sanoTTS voices, or a voice distilled from bigger TTS models.
 - Free more internal RAM so the camera, Bluetooth and speech can all run together.

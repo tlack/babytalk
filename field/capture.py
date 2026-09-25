@@ -276,6 +276,9 @@ def main():
     ap.add_argument("--sources", nargs="*", choices=SOURCES, help="only prompts from these sources (e.g. terms)")
     ap.add_argument("--retake", action="store_true", help="re-record prompts the model got wrong (new voice/speed)")
     ap.add_argument("--hard", action="store_true", help="prompts containing words the model gets wrong")
+    ap.add_argument("--include-test", action="store_true",
+                    help="let --retake/--hard use test prompts too (default: train only, so the test set "
+                         "doesn't drift toward the hardest material and scores stay comparable over time)")
     ap.add_argument("--tts-speed", default="0.75,1.05",
                     help="laptop voice speed, random per clip from this range (1 = Piper's normal, lower = slower)")
     ap.add_argument("--board", default="waveshare-s3cam")
@@ -307,10 +310,11 @@ def main():
         voices = Voices()
         specs = voices.specs(n_multi=30)
         vi = int(hashlib.sha1(sid.encode()).hexdigest(), 16) % len(specs)
+        targeted = [p for p in load_prompts() if a.include_test or p["split"] == "train"]
         if a.retake:
-            pick = retake_picker(load_prompts())
+            pick = retake_picker(targeted)
         elif a.hard:
-            pick = hard_picker(load_prompts())
+            pick = hard_picker(targeted)
         else:
             pick = picker(load_prompts(), seed=sid, sources=a.sources)
         import random

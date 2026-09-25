@@ -11,6 +11,9 @@ text = stt.transcribe(pcm)                 # 16 kHz audio -> "what's the weather
 audio = tts.say("You said: " + text)       # text -> 24 kHz audio for the speaker
 ```
 
+It also runs from **Erlang and Elixir** on [AtomVM](https://github.com/atomvm/AtomVM): see
+[BabyTalk for AtomVM](#babytalk-for-atomvm-erlang--elixir).
+
 Made by Thomas Lackner and Claude Opus 5.5 (Anthropic). MIT licensed; the speech models
 belong to their authors (see [Credits and licenses](#credits-and-licenses)).
 
@@ -297,6 +300,21 @@ cd field && uv run prompts.py                                   # build the sent
 uv run capture.py --condition truck-idle --noise "diesel idling"   # a recording session
 cd ../export && uv run field_eval.py --split all                # score the models
 cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune on the GPU
+```
+
+## BabyTalk for AtomVM (Erlang / Elixir)
+
+The same engine, from Erlang and Elixir on AtomVM v0.7 ([atomvm/README.md](atomvm/README.md)):
+speech to text, a wake phrase and a gapless microphone stream, with a supervised
+`gen_server` listener, plus **MMRT** as a standalone library of int8/int4 vector kernels
+(matvec, matmul, dot, top-k... on the S3's SIMD unit) for any AtomVM project. Transcripts are
+identical to the MicroPython firmware's. AtomVM has no I2S driver yet, so BabyTalk brings its
+own C drivers for the board's audio chips (ES7210 mic ADC, CH32V003 IO expander); text to
+speech is not ported yet.
+
+```erlang
+{ok, Pcm} = babytalk:record(3),
+{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000).
 ```
 
 ## Limitations

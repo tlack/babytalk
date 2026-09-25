@@ -17,7 +17,7 @@ PORT="$FW/micropython/ports/esp32"
 # bank instead of two saves ~40KB of internal RAM.
 SANOTTS_DIR="${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}"
 TTS_ARGS=()
-EXTRA="$HERE/components"
+EXTRA="$HERE/components;$HERE/../components"      # mpy-only + shared (mmrt, sram_pool, stt_engine)
 [ -f "$FW/micropython-camera-API/micropython.cmake" ] && EXTRA="$FW/micropython-camera-API;$EXTRA"
 if [ -f "$SANOTTS_DIR/esphome/components/sanotts/snt_nano.c" ]; then
     SRC="$FW/sanotts_src"

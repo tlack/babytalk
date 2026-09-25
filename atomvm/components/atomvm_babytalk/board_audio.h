@@ -27,6 +27,8 @@ void board_audio_rx_stop(void);                      // frees the port
 // Play mono PCM at `rate` Hz through the speaker, blocking. volume 0..100 (DAC; 75 = 0 dB).
 // The amp is on only while playing (after the stream starts: no turn-on pop).
 int board_audio_play(const int16_t *mono, int n, int rate, int volume);
+// DMA underruns during the last play (each one a short gap of silence).
+int board_audio_underruns(void);
 
 #ifdef __cplusplus
 }

@@ -306,6 +306,7 @@ static void audio_task(void *arg)
         int rc = board_audio_init(MIC_GAIN);  // once; later calls return at once
         if (s_aj.kind == AUDIO_PLAY) {
             if (!rc) rc = board_audio_play(s_aj.pcm, s_aj.n, s_aj.rate, s_aj.volume);
+            if (!rc) ESP_LOGI(TAG, "played %d samples, %d DMA underruns", s_aj.n, board_audio_underruns());
             heap_caps_free(s_aj.pcm);
             if (rc) ESP_LOGW(TAG, "playback failed: %d", rc);
             atomic_store(&s_audio_claimed, 0);

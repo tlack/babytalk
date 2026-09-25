@@ -10,9 +10,11 @@
 
 start() ->
     io:format("tts_demo: ~p~n", [babytalk:heap_info()]),
-    lists:foreach(fun say/1, ?TEXTS),
-    io:format("tts_demo done ~p~n", [babytalk:heap_info()]),
-    timer:sleep(infinity).
+    loop(3).
+
+%% a few rounds, with pauses: time to film it
+loop(0) -> io:format("tts_demo done ~p~n", [babytalk:heap_info()]), timer:sleep(infinity);
+loop(N) -> lists:foreach(fun say/1, ?TEXTS), timer:sleep(3000), loop(N - 1).
 
 say(Text) ->
     T0 = erlang:monotonic_time(millisecond),
@@ -23,6 +25,6 @@ say(Text) ->
               [Text, Secs, Ms, Ms / 1000 / Secs, Info, hex(crypto:hash(sha256, Pcm))]),
     {ok, Ref} = babytalk:play(Pcm, proplists:get_value(rate, Info)),
     receive {babytalk_play, Ref, R} -> io:format("  played: ~p~n", [R]) end,
-    timer:sleep(500).
+    timer:sleep(1500).
 
 hex(Bin) -> [io_lib:format("~2.16.0b", [B]) || <<B>> <= binary:part(Bin, 0, 8)].

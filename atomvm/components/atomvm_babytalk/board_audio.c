@@ -9,6 +9,7 @@
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_attr.h"
 #include "freertos/task.h"
 
 #define PIN_SCL 7
@@ -203,6 +204,19 @@ static int tx_write(i2s_chan_handle_t tx, const int16_t *mono, int n)
     return 0;
 }
 
+static volatile int s_underruns;
+
+static bool IRAM_ATTR on_underrun(i2s_chan_handle_t h, i2s_event_data_t *e, void *u)
+{
+    (void) h;
+    (void) e;
+    (void) u;
+    s_underruns++;
+    return false;
+}
+
+int board_audio_underruns(void) { return s_underruns; }
+
 int board_audio_play(const int16_t *mono, int n, int rate, int volume)
 {
     if (!s_ready || s_rx) return -1;  // the port is capturing
@@ -210,12 +224,15 @@ int board_audio_play(const int16_t *mono, int n, int rate, int volume)
     if (wr(s_dac, 0x32, volume ? (uint8_t) (volume * 256 / 100 - 1) : 0)) return -2;
     i2s_chan_handle_t tx;
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    cc.dma_frame_num = 240;
-    cc.dma_desc_num = 6;
+    cc.dma_frame_num = 480;
+    cc.dma_desc_num = 8;  // 160 ms at 24 kHz
     cc.auto_clear = true;  // underrun -> silence, not a repeated buffer
     if (i2s_new_channel(&cc, &tx, NULL) != ESP_OK) return -5;
     i2s_std_config_t sc = std_cfg(rate, PIN_DOUT, I2S_GPIO_UNUSED);
-    int rc = i2s_channel_init_std_mode(tx, &sc) == ESP_OK && i2s_channel_enable(tx) == ESP_OK ? 0 : -6;
+    const i2s_event_callbacks_t cb = {.on_send_q_ovf = on_underrun};
+    s_underruns = 0;
+    int rc = i2s_channel_init_std_mode(tx, &sc) == ESP_OK && i2s_channel_register_event_callback(tx, &cb, NULL) == ESP_OK
+                     && i2s_channel_enable(tx) == ESP_OK ? 0 : -6;
     if (!rc) {
         rc = tx_write(tx, NULL, rate / 20);               // 50 ms of silence: clocks settle
         if (!rc) rc = exp_pin(EXP_AMP, 1) ? -2 : 0;       // then the amp

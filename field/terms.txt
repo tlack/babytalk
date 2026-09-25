@@ -1,0 +1,43 @@
+# Your own sentences for the prompt pool: one per line, written the way you'd say them.
+# Numbers are fine ("channel 7" is read as "channel seven"). Lines starting with # are ignored.
+# Short commands and names the audiobook-trained model has never heard matter most.
+wake up tomato face
+hey tomato face what time is it
+ask Claude Opus to summarize my messages
+Claude Opus wrote most of this code
+Anthropic released a new version of Claude today
+send a message over LoRa to the base station
+check the Meshtastic mesh for new messages
+how many nodes are on the mesh right now
+the Humvee is running rough this morning
+the diesel engine needs an oil change soon
+turn on the lights in the garage
+set a timer for ten minutes
+what's the weather like today
+what's the battery level on the watch
+read my last message out loud
+reply to the last message and say I'm on my way
+send my location to the group
+the ESP thirty two is running MicroPython
+flash the new firmware over the air
+the camera node on the porch went offline
+restart the gateway in the shed
+what is the signal strength on channel two
+switch the radio to the long range preset
+the GPS says we're about twelve miles from home
+we need to stop for fuel at the next exit
+the tire pressure warning light is on
+it's too loud in here to hear the radio
+remind me to charge the handheld tonight
+how far is the nearest gas station
+turn the fan down and the heat up
+open the garage door
+lock the front door
+is anyone at the front door
+play some music
+stop
+cancel that
+yes
+no
+repeat that please
+what did you say

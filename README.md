@@ -305,16 +305,17 @@ cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune on t
 ## BabyTalk for AtomVM (Erlang / Elixir)
 
 The same engine, from Erlang and Elixir on AtomVM v0.7 ([atomvm/README.md](atomvm/README.md)):
-speech to text, a wake phrase and a gapless microphone stream, with a supervised
-`gen_server` listener, plus **MMRT** as a standalone library of int8/int4 vector kernels
+speech to text, text to speech, a wake phrase with audible chimes, microphone and speaker,
+run by a supervised `gen_server`, plus **MMRT** as a standalone library of int8/int4 vector kernels
 (matvec, matmul, dot, top-k... on the S3's SIMD unit) for any AtomVM project. Transcripts are
 identical to the MicroPython firmware's. AtomVM has no I2S driver yet, so BabyTalk brings its
-own C drivers for the board's audio chips (ES7210 mic ADC, CH32V003 IO expander); text to
-speech is not ported yet.
+own C drivers for the board's audio chips (ES7210 mic ADC, ES8311 codec, NS4150B amp,
+CH32V003 IO expander).
 
 ```erlang
 {ok, Pcm} = babytalk:record(3),
-{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000).
+{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000),
+ok = babytalk:speak([<<"You said: ">>, Text]).
 ```
 
 ## Limitations

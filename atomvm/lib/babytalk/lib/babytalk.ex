@@ -7,6 +7,9 @@ defmodule BabyTalk do
   """
   defdelegate transcribe(pcm), to: :babytalk
   defdelegate transcribe_sync(pcm, timeout), to: :babytalk
+  defdelegate listen(chunk_ms), to: :babytalk
+  defdelegate stop_listening(), to: :babytalk
+  defdelegate record(secs), to: :babytalk
   defdelegate phrase(spellings), to: :babytalk
   defdelegate cache(bytes), to: :babytalk
   defdelegate info(), to: :babytalk

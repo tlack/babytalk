@@ -5,10 +5,11 @@
 %% 0.2 s per second of audio and runs on its own task, so transcribe/1 returns at once and
 %% the result arrives as a message. One transcription at a time: others get {error, busy}.
 -module(babytalk).
--export([transcribe/1, transcribe_sync/2, phrase/1, cache/1, info/0, heap_info/0]).
-%% AtomVM binds NIFs only to external calls (Module:Fun), so the NIF is exported and called
-%% as ?MODULE:transcribe_nif/1.
--export([transcribe_nif/1]).
+-export([transcribe/1, transcribe_sync/2, listen/1, stop_listening/0, record/1,
+         phrase/1, cache/1, info/0, heap_info/0]).
+%% AtomVM binds NIFs only to external calls (Module:Fun), so NIFs wrapped here are exported
+%% and called as ?MODULE:name_nif(...).
+-export([transcribe_nif/1, listen_nif/1]).
 
 -type info() :: [{score, float() | undefined} | {span, {integer(), integer()}} | {frames, integer()}
                  | {fe_ms | model_ms | dec_ms, float()}].
@@ -33,6 +34,49 @@ transcribe_sync(Pcm, Timeout) ->
     end.
 
 transcribe_nif(_Pcm) -> erlang:nif_error(undefined).
+
+%% Stream the microphone (Waveshare S3-CAM: ES7210, mic 1) to the caller, gapless, in
+%% ChunkMs pieces of 16 kHz mono PCM, while transcriptions keep running:
+%%   {babytalk_mic, Ref, Pcm}               every ChunkMs
+%%   {babytalk_mic, Ref, stopped}           after stop_listening/0 (the last message)
+%%   {babytalk_mic, Ref, {error, Code}}     on a capture failure (also the last message)
+%% One listener at a time: others get {error, busy}.
+-spec listen(pos_integer()) -> {ok, reference()} | {error, busy}.
+listen(ChunkMs) -> ?MODULE:listen_nif(ChunkMs).
+
+listen_nif(_ChunkMs) -> erlang:nif_error(undefined).
+
+-spec stop_listening() -> ok.
+stop_listening() -> erlang:nif_error(undefined).
+
+%% Record Secs seconds (a number) from the microphone: 16 kHz mono PCM.
+-spec record(number()) -> {ok, binary()} | {error, term()}.
+record(Secs) ->
+    Bytes = round(Secs * 32000) band (bnot 1),
+    case listen(min(500, max(20, round(Secs * 1000)))) of
+        {ok, Ref} -> collect(Ref, Bytes, 0, []);
+        Error -> Error
+    end.
+
+collect(Ref, Want, Have, Acc) when Have >= Want ->
+    ok = stop_listening(),
+    drain(Ref),
+    <<Pcm:Want/binary, _/binary>> = iolist_to_binary(lists:reverse(Acc)),
+    {ok, Pcm};
+collect(Ref, Want, Have, Acc) ->
+    receive
+        {babytalk_mic, Ref, Pcm} when is_binary(Pcm) -> collect(Ref, Want, Have + byte_size(Pcm), [Pcm | Acc]);
+        {babytalk_mic, Ref, Other} -> {error, Other}
+    after 5000 -> ok = stop_listening(), {error, timeout}
+    end.
+
+%% up to the stream's last message
+drain(Ref) ->
+    receive
+        {babytalk_mic, Ref, Pcm} when is_binary(Pcm) -> drain(Ref);
+        {babytalk_mic, Ref, _Last} -> ok
+    after 5000 -> ok
+    end.
 
 %% Set the wake phrase to score each transcription against: one or more spellings of it
 %% (binaries or strings; only letters count). [] clears it. Returns the number of token

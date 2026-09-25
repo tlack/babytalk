@@ -1,0 +1,5 @@
+# SANOTTS_BSS_PSRAM builds: every zero-initialized static of the sanoTTS runtime in PSRAM.
+[mapping:sanotts]
+archive: libsanotts.a
+entries:
+    * (extram_bss)

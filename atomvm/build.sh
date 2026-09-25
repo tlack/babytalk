@@ -26,7 +26,7 @@ done
 E="$AVM/src/platforms/esp32"
 for c in "$HERE"/components/*/; do ln -sfn "$c" "$E/components/$(basename "$c")"; done
 # Engine components shared with the MicroPython firmware (repo-root components/)
-for c in mmrt sram_pool stt_engine; do ln -sfn "$HERE/../components/$c" "$E/components/$c"; done
+for c in mmrt sram_pool stt_engine sanotts; do ln -sfn "$HERE/../components/$c" "$E/components/$c"; done
 cp "$HERE/partitions-babytalk.csv" "$E/"
 
 # Re-apply our overlay whenever it changes (set-target regenerates sdkconfig from defaults)
@@ -37,7 +37,16 @@ if [ ! -f sdkconfig ] || [ "$(cat .babytalk-overlay 2>/dev/null)" != "$stamp" ];
     idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;$HERE/sdkconfig.babytalk" set-target esp32s3
     echo "$stamp" > .babytalk-overlay
 fi
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;$HERE/sdkconfig.babytalk" build
+# Text to speech: sanoTTS sources (github.com/Ampixa/sanoTTS) copied and patched; its static
+# buffers go to PSRAM (internal RAM is short next to AtomVM + WiFi)
+mkdir -p "$OUT"
+TTS_ARGS=()
+if "$HERE/../components/sanotts/prepare.sh" "${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}" "$OUT/sanotts_src"; then
+    TTS_ARGS=(-D SANOTTS_SRC="$OUT/sanotts_src" -D SANOTTS_BSS_PSRAM=1)
+else
+    echo "no sanoTTS checkout: building without text to speech" >&2
+fi
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;$HERE/sdkconfig.babytalk" "${TTS_ARGS[@]}" build
 
 # boot.avm: the Erlang + Elixir standard libraries, cut from the release image (at 0x1D0000 there)
 mkdir -p "$OUT"
@@ -56,6 +65,6 @@ PY
 python -m esptool --chip esp32s3 merge_bin -o "$OUT/atomvm-babytalk.img" \
     --flash_mode keep --flash_freq keep --flash_size keep \
     0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin \
-    0x10000 build/atomvm-esp32.bin 0x310000 "$OUT/boot.avm"
+    0x10000 build/atomvm-esp32.bin 0x410000 "$OUT/boot.avm"
 ls -l "$OUT/atomvm-babytalk.img" build/atomvm-esp32.bin
-echo "flash: esptool.py --chip esp32s3 write_flash 0x0 $OUT/atomvm-babytalk.img   (apps go to main.avm at 0x390000)"
+echo "flash: esptool.py --chip esp32s3 write_flash 0x0 $OUT/atomvm-babytalk.img   (apps go to main.avm at 0x490000, the model to 0x590000)"

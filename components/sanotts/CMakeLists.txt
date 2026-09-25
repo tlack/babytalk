@@ -1,7 +1,9 @@
-# sanoTTS (github.com/Ampixa/sanoTTS, ESPHome component sources) + our wrapper.
-# SANOTTS_SRC: a copy of esphome/components/sanotts prepared by mpy/build.sh; without
-# it this component is empty and the firmware has no `tts` module. REQUIRES stays
-# unconditional: IDF's early requirements pass does not see -D cache variables.
+# sanoTTS (github.com/Ampixa/sanoTTS, ESPHome component sources) + our wrapper, shared by
+# the MicroPython (mpy/) and AtomVM (atomvm/) firmwares. SANOTTS_SRC: a copy of
+# esphome/components/sanotts made by prepare.sh; without it this component is empty.
+# SANOTTS_BSS_PSRAM: put the runtime's ~104 KB of static buffers in PSRAM (linker.lf; needs
+# CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY) -- the synthesis arena stays in internal SRAM.
+# REQUIRES stays unconditional: IDF's early requirements pass does not see -D cache variables.
 set(srcs "")
 set(incs "")
 if(DEFINED SANOTTS_SRC AND EXISTS "${SANOTTS_SRC}/snt_nano.c")
@@ -11,7 +13,12 @@ if(DEFINED SANOTTS_SRC AND EXISTS "${SANOTTS_SRC}/snt_nano.c")
              "${S}/nano_lex_g2p.c" "${S}/nano_lex_tables.c")
     set(incs "." "${S}")
 endif()
-idf_component_register(SRCS ${srcs} INCLUDE_DIRS ${incs} REQUIRES esp_timer heap esp_hw_support sram_pool)
+set(frags "")
+if(srcs AND SANOTTS_BSS_PSRAM)
+    set(frags "linker.lf")
+endif()
+idf_component_register(SRCS ${srcs} INCLUDE_DIRS ${incs} LDFRAGMENTS ${frags}
+                       REQUIRES esp_timer heap esp_hw_support sram_pool)
 if(srcs)
     # SNT_NANO_FAST_MATH: the only math config sanoTTS gated for this voice.
     # NANO_LEX_WITH_SILVER=0: gold dictionary only (1.5 MB instead of 3.05 MB of flash).

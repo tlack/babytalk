@@ -12,19 +12,14 @@ FW="${1:-$HOME/build/sentry-fw}"
 export IDF_PATH="${IDF_PATH:-$HOME/build/dstike-fw/esp-idf}"
 . "$IDF_PATH/export.sh" >/dev/null
 PORT="$FW/micropython/ports/esp32"
-# Optional TTS: sanoTTS checkout (github.com/Ampixa/sanoTTS). Its ESPHome component is
-# copied and patched: the runtime is serial here (snt_scratch_id() == 0), so one scratch
-# bank instead of two saves ~40KB of internal RAM.
+# Optional TTS: sanoTTS checkout (github.com/Ampixa/sanoTTS), copied and patched by
+# components/sanotts/prepare.sh.
 SANOTTS_DIR="${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}"
 TTS_ARGS=()
 EXTRA="$HERE/components;$HERE/../components"      # mpy-only + shared (mmrt, sram_pool, stt_engine)
 [ -f "$FW/micropython-camera-API/micropython.cmake" ] && EXTRA="$FW/micropython-camera-API;$EXTRA"
-if [ -f "$SANOTTS_DIR/esphome/components/sanotts/snt_nano.c" ]; then
-    SRC="$FW/sanotts_src"
-    rm -rf "$SRC" && cp -r "$SANOTTS_DIR/esphome/components/sanotts" "$SRC"
-    sed -i 's/^static NanoScratch g_scr\[2\];/static NanoScratch g_scr[1];/' "$SRC/snt_nano.c"
-    grep -q 'g_scr\[1\]' "$SRC/snt_nano.c"
-    TTS_ARGS=(-D SANOTTS_SRC="$SRC")
+if "$HERE/../components/sanotts/prepare.sh" "$SANOTTS_DIR" "$FW/sanotts_src"; then
+    TTS_ARGS=(-D SANOTTS_SRC="$FW/sanotts_src")
 fi
 BOARD=SENTRY_S3_STT
 cp "$HERE/boards/$BOARD/partitions-stt.csv" "$PORT/partitions-sentry-stt.csv"

@@ -7,6 +7,10 @@
 //       then {babytalk_mic, Ref, Pcm16Mono} every ChunkMs (ES7210 mic 1, 16 kHz, gapless)
 //       until stop_listening(), then {babytalk_mic, Ref, stopped}; or {babytalk_mic, Ref, {error, Code}}
 //   babytalk:stop_listening() -> ok
+//   babytalk:play_nif(Pcm16Mono, Rate, Volume) -> {ok, Ref} | {error, busy}
+//       then {babytalk_play, Ref, done | {error, Code}} (ES8311 + NS4150B speaker)
+//   babytalk:say_nif(Text) -> {ok, Ref} | {error, busy}
+//       then {babytalk, Ref, {ok, Pcm24kMono, Info} | {error, Code}} (sanoTTS)
 //   babytalk:phrase(Spellings) -> {ok, Sequences} | {error, busy | no_memory}
 //   babytalk:cache(Bytes) -> {ok, Cached} | {error, busy | Code}
 //   babytalk:info() -> [{Key, Value}]
@@ -39,7 +43,8 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-#include "mic.h"
+#include "board_audio.h"
+#include "tts_engine.h"
 #include "sram_pool.h"
 #include "stt_engine.h"
 
@@ -48,6 +53,11 @@
 // AtomVM atom strings: length byte, then the name
 static const char *const A_BABYTALK = "\x08" "babytalk";
 static const char *const A_BABYTALK_MIC = "\x0C" "babytalk_mic";
+static const char *const A_BABYTALK_PLAY = "\x0D" "babytalk_play";
+static const char *const A_PHONEMES = "\x08" "phonemes";
+static const char *const A_G2P_MS = "\x06" "g2p_ms";
+static const char *const A_SYNTH_MS = "\x08" "synth_ms";
+static const char *const A_RATE = "\x04" "rate";
 static const char *const A_STOPPED = "\x07" "stopped";
 static const char *const A_BUSY = "\x04" "busy";
 static const char *const A_NO_MEMORY = "\x09" "no_memory";
@@ -81,9 +91,13 @@ static bool lock_engine(void)
 static void unlock_engine(void) { atomic_store(&s_busy, 0); }
 
 // ------------------------------------------------------------------------------ worker task
+enum { JOB_STT, JOB_TTS };
+
 typedef struct {
-    int16_t *pcm;  // PSRAM copy, freed by the worker
+    int kind;
+    int16_t *pcm;  // JOB_STT: PSRAM copy of the audio, freed by the worker
     int n;
+    char *text;    // JOB_TTS: copy of the text, freed by the worker
     int32_t pid;
     uint64_t ref;
 } job_t;
@@ -170,35 +184,83 @@ static void do_transcribe(const job_t *j)
     send_transcript(j, rc, &out);
 }
 
+// Result: {ok, Pcm24k, [{rate, 24000}, {phonemes, N}, {g2p_ms, F}, {synth_ms, F}]} | {error, Code}
+static void do_say(const job_t *j)
+{
+    GlobalContext *g = s_glb;
+    int16_t *pcm;
+    int n;
+    tts_stats_t st;
+    int rc = tts_say(j->text, 0.77f, &pcm, &n, &st);  // peak at 77% of full scale, as mpy's echo
+    free(j->text);
+    unlock_engine();
+    if (rc) ESP_LOGW(TAG, "speech synthesis failed: %d", rc);
+    const size_t bytes = rc ? 0 : (size_t) n * 2;
+    Heap heap;
+    if (UNLIKELY(memory_init_heap(&heap, MSG_WORDS + TUPLE_SIZE(3) + term_binary_heap_size(bytes)
+                                      + 4 * (CONS_SIZE + TUPLE_SIZE(2)) + 2 * FLOAT_SIZE + TUPLE_SIZE(2)) != MEMORY_GC_OK)) {
+        ESP_LOGE(TAG, "no memory for the speech message");
+        heap_caps_free(pcm);  // NULL when tts_say failed
+        return;
+    }
+    term result;
+    term bin = rc ? term_invalid_term() : term_create_uninitialized_binary(bytes, &heap, g);
+    if (!rc && term_is_invalid_term(bin)) rc = -3;
+    if (rc) {
+        result = error_tuple(&heap, term_from_int(rc));
+    } else {
+        memcpy((void *) term_binary_data(bin), pcm, bytes);
+        term info = term_nil();
+        info = prop(&heap, atom(g, A_SYNTH_MS), term_from_float(st.synth_ms, &heap), info);
+        info = prop(&heap, atom(g, A_G2P_MS), term_from_float(st.g2p_ms, &heap), info);
+        info = prop(&heap, atom(g, A_PHONEMES), term_from_int(st.phonemes), info);
+        info = prop(&heap, atom(g, A_RATE), term_from_int(TTS_SAMPLE_RATE), info);
+        result = term_alloc_tuple(3, &heap);
+        term_put_tuple_element(result, 0, OK_ATOM);
+        term_put_tuple_element(result, 1, bin);
+        term_put_tuple_element(result, 2, info);
+    }
+    heap_caps_free(pcm);
+    send_msg(j, &heap, result);
+}
+
 static void worker(void *arg)
 {
     (void) arg;
     job_t j;
     for (;;) {
         xQueueReceive(s_jobs, &j, portMAX_DELAY);
-        do_transcribe(&j);
+        if (j.kind == JOB_TTS) do_say(&j);
+        else do_transcribe(&j);
     }
 }
 
-// ------------------------------------------------------------------------------ mic task
-// Streams the microphone to one listener in ChunkMs pieces, independently of the engine
-// (so audio keeps flowing while a transcription runs). Core 1, priority 6: above the
-// inference worker, so the I2S DMA ring (256 ms) is drained on time.
-static SemaphoreHandle_t s_mic_go;
-static atomic_int s_mic_on;       // 1 while a listener wants chunks
-static atomic_int s_mic_claimed;  // listen() .. the task's `stopped` message
-static int32_t s_mic_pid;
-static uint64_t s_mic_ref;
-static int s_mic_frames;
+// ------------------------------------------------------------------------------ audio task
+// Owns the board's audio (board_audio.c): streams the microphone to one listener in
+// ChunkMs pieces, independently of the engine (so audio keeps flowing while a transcription
+// runs), or plays PCM through the speaker. The two share one I2S port, so they take turns:
+// one claim at a time (listen() .. `stopped`, play() .. `done`). Core 1, priority 6: above
+// the inference worker, so the I2S DMA ring (256 ms) is served on time.
+enum { AUDIO_LISTEN, AUDIO_PLAY };
+static SemaphoreHandle_t s_audio_go;
+static atomic_int s_audio_claimed;
+static atomic_int s_mic_on;  // 1 while a listener wants chunks
+static struct {
+    int kind;
+    int32_t pid;
+    uint64_t ref;
+    int frames;         // listen: per chunk
+    int16_t *pcm;       // play: PSRAM copy, freed by the task
+    int n, rate, volume;
+} s_aj;
 
-// {babytalk_mic, Ref, Payload}; Payload is built by `fill` on the message heap (an invalid
-// term: send nothing)
-static void send_mic(size_t extra_words, term (*fill)(Heap *, void *), void *arg)
+// {Tag, Ref, Payload}; Payload is built by `fill` on the message heap (an invalid term: send nothing)
+static void send_audio(const char *tag, size_t extra_words, term (*fill)(Heap *, void *), void *arg)
 {
     GlobalContext *g = s_glb;
     Heap heap;
     if (UNLIKELY(memory_init_heap(&heap, TUPLE_SIZE(3) + REF_SIZE + extra_words) != MEMORY_GC_OK)) {
-        ESP_LOGE(TAG, "no memory for a mic message");
+        ESP_LOGE(TAG, "no memory for an audio message");
         return;
     }
     term payload = fill(&heap, arg);
@@ -207,18 +269,17 @@ static void send_mic(size_t extra_words, term (*fill)(Heap *, void *), void *arg
         return;
     }
     term msg = term_alloc_tuple(3, &heap);
-    term_put_tuple_element(msg, 0, atom(g, A_BABYTALK_MIC));
-    term_put_tuple_element(msg, 1, term_from_ref_ticks(s_mic_ref, &heap));
+    term_put_tuple_element(msg, 0, atom(g, tag));
+    term_put_tuple_element(msg, 1, term_from_ref_ticks(s_aj.ref, &heap));
     term_put_tuple_element(msg, 2, payload);
-    globalcontext_send_message_from_task(g, s_mic_pid, NormalMessage, msg);
+    globalcontext_send_message_from_task(g, s_aj.pid, NormalMessage, msg);
     memory_destroy_heap(&heap, g);
 }
 
-static term fill_stopped(Heap *h, void *arg)
+static term fill_atom(Heap *h, void *arg)
 {
     (void) h;
-    (void) arg;
-    return atom(s_glb, A_STOPPED);
+    return atom(s_glb, (const char *) arg);
 }
 
 static term fill_error(Heap *h, void *arg) { return error_tuple(h, term_from_int(*(int *) arg)); }
@@ -226,35 +287,49 @@ static term fill_error(Heap *h, void *arg) { return error_tuple(h, term_from_int
 static term fill_chunk(Heap *h, void *arg)
 {
     int *rc = (int *) arg;
-    term pcm = term_create_uninitialized_binary((size_t) s_mic_frames * 2, h, s_glb);
+    term pcm = term_create_uninitialized_binary((size_t) s_aj.frames * 2, h, s_glb);
     if (term_is_invalid_term(pcm)) {
         *rc = -10;
         return pcm;
     }
-    *rc = mic_read_mono((int16_t *) term_binary_data(pcm), s_mic_frames);
+    *rc = board_audio_rx_read((int16_t *) term_binary_data(pcm), s_aj.frames);
     return *rc ? term_invalid_term() : pcm;
 }
 
-static void mic_task(void *arg)
+static const char *const A_DONE = "\x04" "done";
+
+static void audio_task(void *arg)
 {
     (void) arg;
     for (;;) {
-        xSemaphoreTake(s_mic_go, portMAX_DELAY);
-        int rc = mic_open(MIC_GAIN);  // once; later calls are no-ops
-        if (!rc) rc = mic_start();
+        xSemaphoreTake(s_audio_go, portMAX_DELAY);
+        int rc = board_audio_init(MIC_GAIN);  // once; later calls return at once
+        if (s_aj.kind == AUDIO_PLAY) {
+            if (!rc) rc = board_audio_play(s_aj.pcm, s_aj.n, s_aj.rate, s_aj.volume);
+            heap_caps_free(s_aj.pcm);
+            if (rc) ESP_LOGW(TAG, "playback failed: %d", rc);
+            atomic_store(&s_audio_claimed, 0);
+            if (rc) send_audio(A_BABYTALK_PLAY, TUPLE_SIZE(2), fill_error, &rc);
+            else send_audio(A_BABYTALK_PLAY, 0, fill_atom, (void *) A_DONE);
+            continue;
+        }
+        if (!rc) rc = board_audio_rx_start();
         while (!rc && atomic_load(&s_mic_on)) {
-            send_mic(term_binary_heap_size((size_t) s_mic_frames * 2), fill_chunk, &rc);
+            send_audio(A_BABYTALK_MIC, term_binary_heap_size((size_t) s_aj.frames * 2), fill_chunk, &rc);
         }
-        mic_stop();
-        if (rc) {
-            ESP_LOGW(TAG, "mic failed: %d", rc);
-            send_mic(TUPLE_SIZE(2), fill_error, &rc);
-        } else {
-            send_mic(0, fill_stopped, NULL);
-        }
+        board_audio_rx_stop();
+        if (rc) ESP_LOGW(TAG, "mic failed: %d", rc);
         atomic_store(&s_mic_on, 0);
-        atomic_store(&s_mic_claimed, 0);
+        atomic_store(&s_audio_claimed, 0);
+        if (rc) send_audio(A_BABYTALK_MIC, TUPLE_SIZE(2), fill_error, &rc);
+        else send_audio(A_BABYTALK_MIC, 0, fill_atom, (void *) A_STOPPED);
     }
+}
+
+static bool claim_audio(void)
+{
+    int expected = 0;
+    return atomic_compare_exchange_strong(&s_audio_claimed, &expected, 1);
 }
 
 // ------------------------------------------------------------------------------ NIFs
@@ -281,7 +356,7 @@ static term nif_transcribe(Context *ctx, int argc, term argv[])
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
     if (!lock_engine()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
-    job_t j = {heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), (int) (bytes / 2), ctx->process_id,
+    job_t j = {JOB_STT, heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM), (int) (bytes / 2), NULL, ctx->process_id,
                globalcontext_get_ref_ticks(ctx->global)};
     if (!j.pcm) {
         unlock_engine();
@@ -299,19 +374,72 @@ static term nif_listen(Context *ctx, int argc, term argv[])
     const avm_int_t ms = term_to_int(argv[0]);
     if (ms < 20 || ms > 10000) RAISE_ERROR(BADARG_ATOM);
     if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_SIZE) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
-    int expected = 0;
-    if (!atomic_compare_exchange_strong(&s_mic_claimed, &expected, 1)) {
-        return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
-    }
-    s_mic_pid = ctx->process_id;
-    s_mic_ref = globalcontext_get_ref_ticks(ctx->global);
-    s_mic_frames = (int) ms * 16;
+    if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
+    s_aj.kind = AUDIO_LISTEN;
+    s_aj.pid = ctx->process_id;
+    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.frames = (int) ms * 16;
     atomic_store(&s_mic_on, 1);
-    xSemaphoreGive(s_mic_go);
+    xSemaphoreGive(s_audio_go);
     term t = term_alloc_tuple(2, &ctx->heap);
     term_put_tuple_element(t, 0, OK_ATOM);
-    term_put_tuple_element(t, 1, term_from_ref_ticks(s_mic_ref, &ctx->heap));
+    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
     return t;
+}
+
+// play_nif(Pcm16Mono, Rate, Volume) -> {ok, Ref}: then {babytalk_play, Ref, done | {error, Code}}
+static term nif_play(Context *ctx, int argc, term argv[])
+{
+    VALIDATE_VALUE(argv[0], term_is_binary);
+    VALIDATE_VALUE(argv[1], term_is_integer);
+    VALIDATE_VALUE(argv[2], term_is_integer);
+    const size_t bytes = term_binary_size(argv[0]);
+    const avm_int_t rate = term_to_int(argv[1]), vol = term_to_int(argv[2]);
+    if (bytes < 2 || bytes % 2 || rate < 8000 || rate > 48000 || vol < 0 || vol > 100) RAISE_ERROR(BADARG_ATOM);
+    if (UNLIKELY(memory_ensure_free_with_roots(ctx, TUPLE_SIZE(2) + REF_SIZE, argc, argv, MEMORY_CAN_SHRINK) != MEMORY_GC_OK)) {
+        RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    }
+    if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
+    int16_t *pcm = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (!pcm) {
+        atomic_store(&s_audio_claimed, 0);
+        return error_tuple(&ctx->heap, atom(ctx->global, A_NO_MEMORY));
+    }
+    memcpy(pcm, term_binary_data(argv[0]), bytes);
+    s_aj.kind = AUDIO_PLAY;
+    s_aj.pid = ctx->process_id;
+    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.pcm = pcm;
+    s_aj.n = (int) (bytes / 2);
+    s_aj.rate = (int) rate;
+    s_aj.volume = (int) vol;
+    xSemaphoreGive(s_audio_go);
+    term t = term_alloc_tuple(2, &ctx->heap);
+    term_put_tuple_element(t, 0, OK_ATOM);
+    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
+    return t;
+}
+
+// say_nif(Text) -> {ok, Ref}: then {babytalk, Ref, {ok, Pcm24k, Info} | {error, Code}}
+static term nif_say(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+    int ok = 0;
+    char *text = interop_term_to_string(argv[0], &ok);  // binary, string or iolist
+    if (!ok || !text) {
+        free(text);
+        RAISE_ERROR(BADARG_ATOM);
+    }
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_SIZE) != MEMORY_GC_OK)) {
+        free(text);
+        RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    }
+    if (!lock_engine()) {
+        free(text);
+        return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
+    }
+    job_t j = {JOB_TTS, NULL, 0, text, ctx->process_id, globalcontext_get_ref_ticks(ctx->global)};
+    return submit(ctx, &j);
 }
 
 // stop_listening() -> ok: the current chunk finishes, then {babytalk_mic, Ref, stopped}
@@ -428,6 +556,8 @@ static term nif_heap_info(Context *ctx, int argc, term argv[])
 #define NIF(name, fn) static const struct Nif name##_nif = {.base.type = NIFFunctionType, .nif_ptr = fn}
 NIF(transcribe, nif_transcribe);
 NIF(listen, nif_listen);
+NIF(play, nif_play);
+NIF(say, nif_say);
 NIF(stop_listening, nif_stop_listening);
 NIF(phrase, nif_phrase);
 NIF(cache, nif_cache);
@@ -438,7 +568,7 @@ static const struct {
     const char *name;  // "fun/arity"
     const struct Nif *nif;
 } NIFS[] = {
-    {"transcribe_nif/1", &transcribe_nif}, {"listen_nif/1", &listen_nif},
+    {"transcribe_nif/1", &transcribe_nif}, {"listen_nif/1", &listen_nif}, {"play_nif/3", &play_nif}, {"say_nif/1", &say_nif},
     {"stop_listening/0", &stop_listening_nif}, {"phrase/1", &phrase_nif}, {"cache/1", &cache_nif},
     {"info/0", &info_nif}, {"heap_info/0", &heap_info_nif},
 };
@@ -456,15 +586,15 @@ static const struct Nif *babytalk_get_nif(const char *name)
 // At VM start, before any Erlang code (and so before WiFi) takes internal RAM: reserve the
 // engine's 84.5 KB contiguous SRAM block and start the worker. Inference runs on core 1 at
 // the schedulers' priority (5), so it time-slices with the core-1 scheduler; mmrt's own
-// helper task takes core 0 during the big layers. The mic task (see above) sits at 6.
+// helper task takes core 0 during the big layers. The audio task (see above) sits at 6.
 static void babytalk_init(GlobalContext *global)
 {
     s_glb = global;
     if (sram_pool_reserve()) ESP_LOGE(TAG, "could not reserve the SRAM pool: transcription will fail");
     s_jobs = xQueueCreate(1, sizeof(job_t));
-    s_mic_go = xSemaphoreCreateBinary();
-    if (!s_jobs || !s_mic_go || xTaskCreatePinnedToCore(worker, "babytalk", 12 * 1024, NULL, 5, NULL, 1) != pdPASS
-        || xTaskCreatePinnedToCore(mic_task, "babytalk_mic", 4 * 1024, NULL, 6, NULL, 1) != pdPASS) {
+    s_audio_go = xSemaphoreCreateBinary();
+    if (!s_jobs || !s_audio_go || xTaskCreatePinnedToCore(worker, "babytalk", 12 * 1024, NULL, 5, NULL, 1) != pdPASS
+        || xTaskCreatePinnedToCore(audio_task, "babytalk_audio", 4 * 1024, NULL, 6, NULL, 1) != pdPASS) {
         ESP_LOGE(TAG, "could not start the babytalk tasks");
     }
 }

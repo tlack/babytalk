@@ -1,0 +1,22 @@
+[project]
+name = "train"
+version = "0.1.0"
+description = "Fine-tune the speech model on the GPU (field recordings, noise, TTS)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.8",
+    "numpy>=2.2.6",
+    "soundfile>=0.14.0",
+    "soxr>=1.1.0",
+    "pyyaml>=6",
+    "jiwer>=3",
+    "piper-tts>=1.8.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }

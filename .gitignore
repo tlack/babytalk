@@ -19,3 +19,4 @@ __pycache__/
 # full-flash dumps contain node tokens / wifi creds
 backups/
 field/.venv/
+train/.venv/

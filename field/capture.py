@@ -3,6 +3,7 @@ prompt in a TTS voice, both captured by the board's mics. Repeat for --rounds pr
 then move things around and start the next session.
 
     uv run capture.py --condition desk-quiet
+    uv run capture.py --condition desk-quiet --sources terms --no-human --rounds 20
     uv run capture.py --condition humvee-idle --noise "6.2L diesel idling" --distance 0.5 --gain 6
     uv run capture.py --condition humvee-driving --noise "diesel, 45 mph, windows up" --gain 4
     uv run capture.py --noise-bed 120 --condition humvee-driving --noise "diesel, 45 mph"
@@ -181,16 +182,20 @@ def recorded_ids():
     return {json.loads(l)["prompt_id"] for l in open(MANIFEST)}
 
 
-def picker(prompts, seed):
+def picker(prompts, seed, sources=None):
     """Staggered lengths (1/4/8/12/20 s), rotating sources, prompts not recorded yet first."""
     import random
     rng = random.Random(seed)
+    srcs = [s for s in SOURCES if not sources or s in sources]
+    prompts = [p for p in prompts if p["source"] in srcs]
+    if not prompts:
+        sys.exit(f"no prompts from sources {sources}")
     done = recorded_ids()
     fresh = [p for p in prompts if p["id"] not in done] or prompts
     i = 0
     while True:
         b = BUCKET_ORDER[i % len(BUCKET_ORDER)]
-        src = SOURCES[(i // len(BUCKET_ORDER)) % len(SOURCES)]
+        src = srcs[(i // len(BUCKET_ORDER)) % len(srcs)]
         pool = [p for p in fresh if p["bucket"] == b and p["source"] == src] or \
                [p for p in fresh if p["bucket"] == b] or fresh
         p = rng.choice(pool)
@@ -218,6 +223,9 @@ def main():
     ap.add_argument("--noise-bed", type=float, default=0, help="record only background noise for this many seconds")
     ap.add_argument("--no-tts", action="store_true", help="only your voice")
     ap.add_argument("--no-human", action="store_true", help="only the laptop voices")
+    ap.add_argument("--sources", nargs="*", choices=SOURCES, help="only prompts from these sources (e.g. terms)")
+    ap.add_argument("--tts-speed", default="0.75,1.05",
+                    help="laptop voice speed, random per clip from this range (1 = Piper's normal, lower = slower)")
     ap.add_argument("--board", default="waveshare-s3cam")
     ap.add_argument("--mic", default="es7210")
     ap.add_argument("--port", default="/dev/ttyACM0")
@@ -247,7 +255,10 @@ def main():
         voices = Voices()
         specs = voices.specs(n_multi=30)
         vi = int(hashlib.sha1(sid.encode()).hexdigest(), 16) % len(specs)
-        pick = picker(load_prompts(), seed=sid)
+        pick = picker(load_prompts(), seed=sid, sources=a.sources)
+        import random
+        srng = random.Random(sid + "speed")
+        lo, hi = (float(x) for x in a.tts_speed.split(","))
         n = 0
         for r in range(a.rounds):
             p = next(pick)
@@ -272,9 +283,10 @@ def main():
                 vi += 1
                 voice = spec[0].replace("en_US-", "").replace("en_GB-", "").replace("-medium", "") + \
                         (f"-{spec[1]}" if spec[1] is not None else "")
-                tts = voices.say(p["display"], spec)
+                speed = round(srng.uniform(lo, hi), 2)
+                tts = voices.say(p["display"], spec, speed=speed)
                 win = stage(tts, "mm_field_tts.wav")
-                print(f"  {DIM}laptop speaks ({voice}, {len(tts) / RATE:.1f} s)...{RESET}")
+                print(f"  {DIM}laptop speaks ({voice}, speed {speed}, {len(tts) / RATE:.1f} s)...{RESET}")
                 procs = []
                 pcm = board.record(len(tts) / RATE + 1.5, on_start=lambda: procs.append(play_async(win)))
                 for pr in procs:
@@ -282,7 +294,7 @@ def main():
                 lv = levels(pcm, meta["noise_dbfs"])
                 show_levels(lv)
                 n += 1
-                save(sdir, n, f"tts-{voice}", pcm, p, meta, lv)
+                save(sdir, n, f"tts-{voice}", pcm, p, meta, lv, tts_speed=speed)
         meta["clips"] = n
         (sdir / "session.json").write_text(json.dumps(meta, indent=2))
         print(f"\n{GREEN}saved {n} clips -> {sdir.relative_to(ROOT)}{RESET}")
@@ -291,13 +303,13 @@ def main():
         board.close()
 
 
-def save(sdir, n, speaker, pcm, p, meta, lv):
+def save(sdir, n, speaker, pcm, p, meta, lv, **extra):
     name = f"{n:02d}-{speaker}.wav"
     sf.write(sdir / name, pcm, RATE, subtype="PCM_16")
     append(MANIFEST, {"id": f"{meta['session']}/{n:02d}", "file": str((sdir / name).relative_to(DATA)),
                       "speaker": speaker, "prompt_id": p["id"], "ref": p["ref"], "display": p["display"],
                       "source": p["source"], "bucket": p["bucket"], "split": p["split"],
-                      "secs": round(len(pcm) / RATE, 2), **lv,
+                      "secs": round(len(pcm) / RATE, 2), **lv, **extra,
                       **{k: meta[k] for k in ("session", "condition", "noise", "distance_m", "speaker_distance_m",
                                               "board", "mic", "gain", "noise_dbfs")}})
 

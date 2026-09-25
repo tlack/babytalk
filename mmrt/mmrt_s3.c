@@ -521,6 +521,14 @@ void mmrt_s3_mean(const int8_t *x, int T, int C, int e_in, int e_out, int8_t *y)
     }
 }
 
+// ---------------------------------------------------------------- matmul for other callers
+void mmrt_s3_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y,
+                          int y_stride)
+{
+    mmrt_s3_c1_t a = {NULL, C / 16 - 1, 1, shift, relu};
+    for (int t = 0; t < T; t++) mmrt_s3_conv1x1_row(y + (size_t)t * y_stride, x + (size_t)t * C, w, &a);
+}
+
 // ---------------------------------------------------------------- CB4 decode
 void mmrt_s3_cb4_rows(int8_t *dst, const uint8_t *idx, const uint32_t *tab32, int C);
 

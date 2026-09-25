@@ -1,0 +1,3 @@
+config AVM_ENABLE_MMRT_NIFS
+    bool "Enable MMRT (int8/int4 vector kernel) NIFs"
+    default y

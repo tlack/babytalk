@@ -42,6 +42,14 @@ void mmrt_s3_conv1x1(const int8_t *x, int T_in, int C, const int8_t *w, int wfmt
 void mmrt_s3_dwconv(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad,
                     int shift, int relu, int8_t *y, int T_out);
 
+// Reentrant, one core, no shared buffers (for callers outside the model executor, e.g. the
+// AtomVM NIFs): one output group of a matmul, y[t][0..16) = relu?(sat8(round_half_up(
+// (x[t] . w[i]) >> shift))) for T input rows C bytes apart, output rows y_stride bytes apart.
+// w: [C][16] int8. x, w, y and y_stride 16-byte aligned, C a multiple of 16, 0 <= shift <= 20,
+// and |x[t] . w[i]| < 2^19 (QACC lanes are 20-bit): the caller checks.
+void mmrt_s3_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y,
+                          int y_stride);
+
 // Fused block tail: y = relu?(sat8(round(a*s >> shift) + r)); s (a [C] vector, shift >= 1)
 // and r ([T][C]) may be NULL. Bit-exact with mmrt_mul_bcast_ref -> mmrt_add_ref (equal
 // exponents) -> ReLU.

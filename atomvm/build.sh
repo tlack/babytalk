@@ -26,7 +26,7 @@ done
 E="$AVM/src/platforms/esp32"
 for c in "$HERE"/components/*/; do ln -sfn "$c" "$E/components/$(basename "$c")"; done
 # Engine components shared with the MicroPython firmware (repo-root components/)
-for c in mmrt; do ln -sfn "$HERE/../components/$c" "$E/components/$c"; done
+for c in mmrt sram_pool stt_engine; do ln -sfn "$HERE/../components/$c" "$E/components/$c"; done
 cp "$HERE/partitions-babytalk.csv" "$E/"
 
 # Re-apply our overlay whenever it changes (set-target regenerates sdkconfig from defaults)

@@ -68,7 +68,9 @@ supervision, state and policy are Erlang.
   | message | *wake* (A5 -> D6) | records until 700 ms of quiet after speech (or 6 s) |
   | idle | *decoding* (G5 -> C5) | transcribes, reports `{command, Text}`, speaks any reply, then *ready* again |
 
-  Replies go through `babytalk_listener:say/2`, which pauses the mic while speaking (so it
+  For dialogs, `ask/3` speaks a prompt, chimes and reports the `{answer, Text}` (recorded
+  until silence, or for a fixed time); `wake_on/2` installs a wake phrase at run time; the
+  `greeting` option is spoken after the wake chime. Replies go through `babytalk_listener:say/2`, which pauses the mic while speaking (so it
   doesn't hear itself); they are spoken 10% slower than the voice's own pace
   (`length_scale`), which is easier to follow. Events to the subscriber: `{heard, Text, Score}`, `{wake, Text,
   Score}`, `{message_end, silence | max_length, Levels}`, `{command, Text}`, `{said, Text}`.
@@ -159,7 +161,9 @@ the official release image, so no host build of AtomVM is needed.
 
 Apps: `apps/mmrt_test` (MMRT test vectors from `gen_vectors.py` + benchmarks),
 `apps/stt_server` + `tools/stt_client.py` (send WAVs over WiFi, get transcripts back),
-`apps/tts_demo` (speech out, speed, PCM hashes), `apps/listen_demo` (the full conversation). Apps that use WiFi need
+`apps/tts_demo` (speech out, speed, PCM hashes), `apps/listen_demo` (the full conversation),
+`apps/wakeword_demo` (teach it your own wake phrase by voice -- "Did you say ...?" -- then
+talk to it; the phrase is stored as the model's own spelling of how you said it). Apps that use WiFi need
 `gen_wifi_creds.sh <app dir>`, which writes a git-ignored `wifi_creds.erl`.
 
 ## Measured (Waveshare ESP32-S3-CAM, 240 MHz, octal PSRAM)

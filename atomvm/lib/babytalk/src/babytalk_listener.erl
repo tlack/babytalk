@@ -11,22 +11,29 @@
 %%   {babytalk_listener, {heard, Text, Score}}   each scored wake window (Score: undefined
 %%                                               when no phrase is set)
 %%   {babytalk_listener, {wake, Text, Score}}    the phrase was heard
-%%   {babytalk_listener, {message_end, silence | max_length, #{ms, floor, peak}}}
+%%   {babytalk_listener, {message_end, silence | max_length | fixed_length, #{ms, floor, peak, levels}}}
 %%                                               the message stopped (levels: RMS)
 %%   {babytalk_listener, {command, Text}}        the message after it
+%%   {babytalk_listener, {answer, Text}}         the answer to ask/3
 %%   {babytalk_listener, {said, Text}}           say/2 finished speaking Text
 %% After a {command, _} the subscriber may answer with say/2 within reply_ms; then (or
 %% right away if it doesn't) the ready chime plays and wake listening resumes.
+%%
+%% Dialogs: ask/3 speaks a prompt, chimes, records the answer and reports {answer, Text}; the
+%% listener then waits (mic off) for the next call. wake_on/2 sets the wake phrase and starts
+%% the wake loop. With no spellings at start, the listener chimes and waits: an app can
+%% enroll a wake phrase first (apps/wakeword_demo).
 %%
 %% Put it under a supervisor: if the mic or the engine fails, it crashes and restarts clean.
 %% Options (map): notify (required); spellings ([binary()], [] = no wake phrase);
 %% threshold (-21.0, from export/kws.py); window_ms (4000) and every_ms (1000) for wake
 %% scoring; silence_ms (700) of quiet that ends a message, max_message_ms (6000);
 %% reply_ms (1500); chunk_ms (125); cues (true); cue_volume (70); voice_volume (76);
-%% length_scale (1.10: speech 10% slower than the voice's own pace, easier to follow).
+%% length_scale (1.10: speech 10% slower than the voice's own pace, easier to follow);
+%% greeting (none: said after the wake chime, e.g. <<"I'm here, how can I help?">>).
 -module(babytalk_listener).
 -behaviour(gen_server).
--export([start_link/1, start_link/2, stop/1, say/2]).
+-export([start_link/1, start_link/2, stop/1, say/2, ask/3, wake_on/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(CUES, #{ready => [{587, 90}, {0, 30}, {880, 140}],      % D5 -> A5
@@ -44,7 +51,11 @@
              msg = [], msg_bytes = 0, voiced = false, quiet = 0, peak = 0, levels = [],  % message being recorded
              floor = 300,        % noise floor (RMS), tracked while listening for the phrase
              decoding = none,    % none | Ref of the message transcription | {pending, Pcm}
-             resume = 0}).       % token of the pending resume timer
+             resume = 0,         % token of the pending resume timer
+             msg_kind = command, % command (after a wake) | answer (to ask/3)
+             msg_fixed = none,   % none | ms: record exactly this long (ask/3's #{ms => _})
+             phrase = none,      % none | spellings to install before the next wake phase
+             awaiting_reply = false}).  % a command was reported: a say/2 is its reply
 
 start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
 start_link(Name, Opts) -> gen_server:start_link({local, Name}, ?MODULE, Opts, []).
@@ -53,24 +64,38 @@ stop(Server) -> gen_server:stop(Server).
 %% Speak Text (iodata) through the speaker; listening pauses meanwhile.
 say(Server, Text) -> gen_server:cast(Server, {say, iolist_to_binary(Text)}).
 
+%% Say Prompt, chime, record the answer (until silence, or exactly #{ms => Ms}) and report
+%% {answer, Text}; then wait.
+ask(Server, Prompt, Opts) -> gen_server:cast(Server, {ask, iolist_to_binary(Prompt), Opts}).
+
+%% Listen for a new wake phrase (spellings: binaries or strings); starts the wake loop.
+wake_on(Server, Spellings) -> gen_server:cast(Server, {wake_on, Spellings}).
+
 init(Opts0) ->
     Opts = maps:merge(#{spellings => [], threshold => -21.0, window_ms => 4000, every_ms => 1000,
                         silence_ms => 700, max_message_ms => 6000, reply_ms => 1500,
                         chunk_ms => 125, cues => true, cue_volume => 70, voice_volume => 76,
-                        length_scale => 1.10}, Opts0),
-    {ok, Seqs} = babytalk:phrase(maps:get(spellings, Opts)),
-    true = Seqs > 0 orelse maps:get(spellings, Opts) =:= [],
-    {ok, output([cue(ready)], wake, #st{opts = Opts})}.
+                        length_scale => 1.10, greeting => none}, Opts0),
+    St = #st{opts = Opts},
+    case maps:get(spellings, Opts) of
+        [] -> {ok, output([cue(ready)], idle, St)};              % wait for ask/3 or wake_on/2
+        Spellings -> {ok, output([cue(ready)], wake, St#st{phrase = Spellings})}
+    end.
 
 handle_call(_Req, _From, St) -> {reply, {error, unknown_call}, St}.
 
-%% a reply to a message (we are waiting after it): speak it, then the ready chime
-handle_cast({say, Text}, #st{phase = idle, then = idle} = St) ->
-    {noreply, output([{say, Text}, cue(ready)], wake, St#st{resume = St#st.resume + 1})};
+%% a reply to a command: speak it, then the ready chime
+handle_cast({say, Text}, #st{awaiting_reply = true} = St) ->
+    {noreply, output([{say, Text}, cue(ready)], wake, St#st{awaiting_reply = false})};
 handle_cast({say, Text}, #st{phase = idle} = St) ->
     {noreply, output([{say, Text}], St#st.then, St)};
 handle_cast({say, Text}, #st{phase = Phase} = St) ->
     {noreply, output([{say, Text}], Phase, St)};
+handle_cast({ask, Prompt, Opts}, St) ->
+    Then = {message, answer, maps:get(ms, Opts, none)},
+    {noreply, output([{say, Prompt}, cue(wake)], Then, St#st{awaiting_reply = false})};
+handle_cast({wake_on, Spellings}, St) ->
+    {noreply, output([cue(ready)], wake, St#st{phrase = Spellings, awaiting_reply = false})};
 handle_cast(_Msg, St) -> {noreply, St}.
 
 %% ---- microphone
@@ -85,12 +110,16 @@ handle_info({babytalk_mic, _Ref, {error, E}}, _St) ->
 %% ---- transcriptions
 handle_info({babytalk, Ref, Result}, #st{scoring = Ref} = St) ->
     {noreply, scored(Result, St#st{scoring = none})};
-handle_info({babytalk, Ref, Result}, #st{decoding = Ref} = St) ->
+handle_info({babytalk, Ref, Result}, #st{decoding = Ref, msg_kind = Kind} = St) ->
     Text = case Result of {ok, T, _} -> T; {error, _} -> <<>> end,
-    notify(St, {command, Text}),
-    Token = St#st.resume + 1,
-    erlang:send_after(maps:get(reply_ms, St#st.opts), self(), {resume, Token}),
-    {noreply, St#st{decoding = none, resume = Token}};
+    notify(St, {Kind, Text}),
+    case Kind of
+        answer -> {noreply, St#st{decoding = none}};           % the app decides what's next
+        command ->
+            Token = St#st.resume + 1,
+            erlang:send_after(maps:get(reply_ms, St#st.opts), self(), {resume, Token}),
+            {noreply, St#st{decoding = none, resume = Token, awaiting_reply = true}}
+    end;
 handle_info(retry_decode, #st{decoding = {pending, Pcm}} = St) ->
     {noreply, start_decoding(Pcm, St)};
 %% ---- output
@@ -112,9 +141,9 @@ handle_info({babytalk_play, Ref, Result}, #st{out_ref = {play, Ref, Item}} = St)
     {noreply, pump(St#st{out_ref = none})};
 handle_info(retry_output, St) ->
     {noreply, pump(St)};
-%% no reply came after a message: chime and listen again
-handle_info({resume, Token}, #st{resume = Token, phase = idle, out = [], out_ref = none} = St) ->
-    {noreply, output([cue(ready)], wake, St)};
+%% no reply came after a command: chime and listen again
+handle_info({resume, Token}, #st{resume = Token, awaiting_reply = true, out = [], out_ref = none} = St) ->
+    {noreply, output([cue(ready)], wake, St#st{awaiting_reply = false})};
 handle_info(_Stale, St) ->
     {noreply, St}.
 
@@ -157,7 +186,17 @@ pump(#st{out = [Item | Rest], opts = Opts} = St) ->
 
 enter(idle, St) ->
     St#st{phase = idle};
-enter(Phase, #st{opts = #{chunk_ms := C}} = St) ->
+enter(wake, #st{phrase = Spellings} = St) when Spellings =/= none ->
+    case babytalk:phrase(Spellings) of             % install the new wake phrase first
+        {ok, _} -> enter(wake, St#st{phrase = none});
+        {error, busy} -> erlang:send_after(50, self(), retry_output), St
+    end;
+enter({message, Kind, Fixed}, St) ->
+    listen(message, St#st{msg_kind = Kind, msg_fixed = Fixed});
+enter(wake, St) ->
+    listen(wake, St).
+
+listen(Phase, #st{opts = #{chunk_ms := C}} = St) ->
     case babytalk:listen(C) of
         {ok, Ref} ->
             St#st{phase = Phase, mic = {on, Ref}, win = [], win_bytes = 0, last = now_ms(),
@@ -206,20 +245,24 @@ scored({ok, Text, Info}, #st{phase = wake, opts = #{threshold := Thr}} = St) ->
     case is_float(Score) andalso Score >= Thr of
         true ->
             notify(St, {wake, Text, Score}),
-            output([cue(wake)], message, St);
+            Greeting = case maps:get(greeting, St#st.opts) of none -> []; G -> [{say, iolist_to_binary(G)}] end,
+            output([cue(wake) | Greeting], {message, command, none}, St);
         false -> St
     end;
 scored({ok, _, _}, St) -> St;                  % arrived after the phase ended
 scored({error, E}, St) -> notify(St, {error, E}), St.
 
-%% record until silence_ms of quiet after some speech, or max_message_ms
-message_chunk(Pcm, #st{msg = M, msg_bytes = B, voiced = V, quiet = Q, floor = F,
-                       opts = #{chunk_ms := C, silence_ms := S, max_message_ms := Max}} = St) ->
+%% record until silence_ms of quiet after some speech, or max_message_ms (or exactly msg_fixed)
+message_chunk(Pcm, #st{msg = M, msg_bytes = B, voiced = V, quiet = Q, msg_fixed = Fixed,
+                       opts = #{chunk_ms := C, silence_ms := S, max_message_ms := Max}} = St0) ->
     R = babytalk:rms(Pcm),
+    St = case V of false -> track_floor(R, St0); true -> St0 end,  % the quiet before speech
+    F = St#st.floor,
     Loud = R > max(3 * F, 250),
     St2 = St#st{msg = [Pcm | M], msg_bytes = B + byte_size(Pcm), voiced = V orelse Loud,
                 quiet = case Loud of true -> 0; false -> Q + C end, peak = max(R, St#st.peak), levels = [R | St#st.levels]},
-    End = if St2#st.voiced andalso St2#st.quiet >= S -> silence;
+    End = if Fixed =/= none -> (St2#st.msg_bytes >= Fixed * 32) andalso fixed_length;
+             St2#st.voiced andalso St2#st.quiet >= S -> silence;
              St2#st.msg_bytes >= Max * 32 -> max_length;
              true -> false
           end,

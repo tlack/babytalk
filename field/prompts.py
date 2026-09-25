@@ -20,6 +20,7 @@ import html
 import json
 import re
 import unicodedata
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -40,10 +41,20 @@ SPOKEN_ACRONYMS = {"NASA", "NATO", "COVID", "OPEC", "UNESCO", "UNICEF", "FEMA", 
                    "LASER", "RADAR", "SCUBA", "NAFTA", "ASEAN", "LED", "GIF"}
 
 
-def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read()
+def fetch(url, tries=5):
+    """GET with a polite pace and backoff on HTTP 429 (Wikipedia rate-limits bursts)."""
+    import time
+    import urllib.error
+    for k in range(tries):
+        time.sleep(0.3)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or k == tries - 1:
+                raise
+            time.sleep(2 * 2 ** k)
 
 
 # ---------------------------------------------------------------- normalization
@@ -178,6 +189,38 @@ def from_wikipedia(days):
     return out
 
 
+def from_hardwords(top, per_word=4):
+    """Sentences containing the words the model gets wrong (data/field/hard_words.json), from
+    the intros of Wikipedia articles found by searching for each word."""
+    hw = ROOT / "data/field/hard_words.json"
+    if not hw.exists():
+        print("  no hard-word list yet (export/hard_words.py)")
+        return []
+    words = [d["word"] for d in json.loads(hw.read_text())["words"]
+             if d["kind"] == "vocab" and len(d["word"]) > 3][:top]
+    out = []
+    for w in words:
+        try:
+            q = urllib.parse.quote(w)
+            res = json.loads(fetch("https://en.wikipedia.org/w/api.php?action=query&list=search&format=json"
+                                   f"&srlimit=6&srsearch={q}"))
+            titles = [x["title"] for x in res["query"]["search"]]
+            if not titles:
+                continue
+            ex = json.loads(fetch("https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext"
+                                  "&format=json&titles=" + urllib.parse.quote("|".join(titles))))
+        except Exception as e:
+            print(f"  wikipedia search failed for {w!r}: {e}")
+            continue
+        got = 0
+        for page in ex["query"]["pages"].values():
+            for sent in sentences(page.get("extract", "")):
+                if re.search(r"\b%s\b" % re.escape(w), sent, re.I) and got < per_word:
+                    out.append(sent)
+                    got += 1
+    return out
+
+
 def from_terms():
     return [l.strip() for l in open(TERMS) if l.strip() and not l.startswith("#")]
 
@@ -186,6 +229,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=7, help="days of Wikipedia most-read")
     ap.add_argument("--no-web", action="store_true")
+    ap.add_argument("--hard", type=int, default=0, metavar="N",
+                    help="also fetch sentences with the top N problem words (export/hard_words.py)")
     a = ap.parse_args()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     old = {}
@@ -197,6 +242,8 @@ def main():
     if not a.no_web:
         srcs["news"] = from_news()
         srcs["wikipedia"] = from_wikipedia(a.days)
+        if a.hard:
+            srcs["hardwords"] = from_hardwords(a.hard)
     today = datetime.date.today().isoformat()
     added = {}
     for src, texts in srcs.items():

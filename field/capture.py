@@ -4,6 +4,8 @@ then move things around and start the next session.
 
     uv run capture.py --condition desk-quiet
     uv run capture.py --condition desk-quiet --sources terms --no-human --rounds 20
+    uv run capture.py --condition desk-quiet --retake --no-human --rounds 20   # redo what went wrong
+    uv run capture.py --condition desk-quiet --hard --no-human --rounds 20     # target problem words
     uv run capture.py --condition humvee-idle --noise "6.2L diesel idling" --distance 0.5 --gain 6
     uv run capture.py --condition humvee-driving --noise "diesel, 45 mph, windows up" --gain 4
     uv run capture.py --noise-bed 120 --condition humvee-driving --noise "diesel, 45 mph"
@@ -50,7 +52,8 @@ BOARD_FILES = {
 }
 RATE = 16000
 BUCKET_ORDER = [1, 4, 8, 12, 20]
-SOURCES = ["librispeech", "news", "wikipedia", "terms"]
+SOURCES = ["librispeech", "news", "wikipedia", "terms", "hardwords"]
+HARD = DATA / "hard_words.json"
 BOLD, DIM, RED, GREEN, YEL, RESET = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 
 
@@ -204,6 +207,53 @@ def picker(prompts, seed, sources=None):
         yield p
 
 
+def hard_list(top=80):
+    """Vocabulary problem words (the float model missed them), from export/hard_words.py."""
+    if not HARD.exists():
+        sys.exit("no hard-word list: run `cd export && uv run field_eval.py --split all && uv run hard_words.py`")
+    h = json.loads(HARD.read_text())
+    # missed by the float model at least half the times it was said: real trouble, not noise
+    ws = [d for d in h["words"] if d["kind"] == "vocab" and len(d["word"]) > 2
+          and d.get("miss_float", 0) / max(1, d["seen"]) >= 0.5]
+    return h, [d["word"] for d in ws][:top]
+
+
+def retake_picker(prompts):
+    """Prompts whose clips the float model got wrong, most errors first."""
+    h, _ = hard_list()
+    by_id = {p["id"]: p for p in prompts}
+    errs = {}
+    for l in open(MANIFEST):
+        r = json.loads(l)
+        e = h["clip_float_errors"].get(r["id"], 0)
+        if e and not r.get("exclude") and r["prompt_id"] in by_id:
+            errs[r["prompt_id"]] = max(errs.get(r["prompt_id"], 0), e)
+    order = sorted(errs, key=lambda k: -errs[k])
+    if not order:
+        sys.exit("no prompts with errors to retake")
+    print(f"{DIM}{len(order)} prompts had errors; retaking the worst first{RESET}")
+    while True:
+        for k in order:
+            yield by_id[k]
+
+
+def hard_picker(prompts):
+    """Prompts containing problem words (not recorded yet first), most problem words first."""
+    _, words = hard_list()
+    ws = set(words)
+    done = recorded_ids()
+    scored = [(len(ws & set(p["ref"].split())), p["id"] not in done, p) for p in prompts]
+    scored = [x for x in scored if x[0]]
+    # unrecorded first, then the most problem words per spoken word (short, targeted sentences)
+    scored.sort(key=lambda x: (not x[1], -x[0] / (5 + x[2]["words"])))
+    if not scored:
+        sys.exit("no prompts contain problem words: try `uv run prompts.py --hard`")
+    print(f"{DIM}{len(scored)} prompts contain problem words{RESET}")
+    while True:
+        for _, _, p in scored:
+            yield p
+
+
 def est_secs(p):
     return min(25.0, p["words"] / 2.3 + 2.5)
 
@@ -224,6 +274,8 @@ def main():
     ap.add_argument("--no-tts", action="store_true", help="only your voice")
     ap.add_argument("--no-human", action="store_true", help="only the laptop voices")
     ap.add_argument("--sources", nargs="*", choices=SOURCES, help="only prompts from these sources (e.g. terms)")
+    ap.add_argument("--retake", action="store_true", help="re-record prompts the model got wrong (new voice/speed)")
+    ap.add_argument("--hard", action="store_true", help="prompts containing words the model gets wrong")
     ap.add_argument("--tts-speed", default="0.75,1.05",
                     help="laptop voice speed, random per clip from this range (1 = Piper's normal, lower = slower)")
     ap.add_argument("--board", default="waveshare-s3cam")
@@ -255,7 +307,12 @@ def main():
         voices = Voices()
         specs = voices.specs(n_multi=30)
         vi = int(hashlib.sha1(sid.encode()).hexdigest(), 16) % len(specs)
-        pick = picker(load_prompts(), seed=sid, sources=a.sources)
+        if a.retake:
+            pick = retake_picker(load_prompts())
+        elif a.hard:
+            pick = hard_picker(load_prompts())
+        else:
+            pick = picker(load_prompts(), seed=sid, sources=a.sources)
         import random
         srng = random.Random(sid + "speed")
         lo, hi = (float(x) for x in a.tts_speed.split(","))

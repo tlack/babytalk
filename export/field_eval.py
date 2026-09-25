@@ -127,7 +127,9 @@ UK_US = {"colour": "color", "colours": "colors", "centre": "center", "centres": 
          "programme": "program", "travelled": "traveled", "travelling": "traveling", "jewellery": "jewelry",
          "cheque": "check", "tyre": "tire", "tyres": "tires", "realise": "realize", "realised": "realized",
          "recognise": "recognize", "recognised": "recognized", "organise": "organize", "organised": "organized",
-         "apologise": "apologize", "analyse": "analyze", "catalogue": "catalog", "dialogue": "dialog"}
+         "apologise": "apologize", "analyse": "analyze", "catalogue": "catalog", "dialogue": "dialog",
+         "levelled": "leveled", "focussed": "focused", "labelled": "labeled", "modelling": "modeling",
+         "cancelled": "canceled", "woollen": "woolen", "plough": "plow", "mould": "mold", "sceptical": "skeptical"}
 
 
 def norm(t):

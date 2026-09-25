@@ -75,11 +75,13 @@ def normalize(text):
     t = re.sub(r"(\d[\d,.]*)\s*%", r"\1 percent", t)
     t = re.sub(r"(\d+)(st|nd|rd|th)\b", lambda m: num2words(int(m.group(1)), to="ordinal"), t)
     t = re.sub(r"\d+(?:,\d{3})*(?:\.\d+)?", _number, t)
-    t = re.sub(r"\b([A-Z]{2,5})s?\b",
-               lambda m: m.group(0) if m.group(1) in SPOKEN_ACRONYMS else " ".join(m.group(1)), t)
     t = t.replace("&", " and ").replace("-", " ")
     t = re.sub(r"\s+", " ", t).strip()
-    ref = re.sub(r"[^a-z' ]", " ", t.lower())
+    # Acronyms stay as written in what's shown and spoken ("AI": people and TTS voices say the
+    # letters; spaced out as "A I", Piper reads "ah eye"). Only the reference spells them.
+    spelled = re.sub(r"\b([A-Z]{2,5})s?\b",
+                     lambda m: m.group(0) if m.group(1) in SPOKEN_ACRONYMS else " ".join(m.group(1)), t)
+    ref = re.sub(r"[^a-z' ]", " ", spelled.lower())
     ref = re.sub(r"\s+", " ", ref.replace(" '", " ").replace("' ", " ")).strip()
     if not ref or re.search(r"\d", t):
         return None

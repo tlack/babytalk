@@ -38,6 +38,8 @@ def load_items(a):
     if (FIELD / "manifest.jsonl").exists():
         for l in open(FIELD / "manifest.jsonl"):
             r = json.loads(l)
+            if r.get("exclude"):       # e.g. audio known not to match its reference
+                continue
             if a.split != "all" and r["split"] != a.split:
                 continue
             if a.session and r["session"] not in a.session:

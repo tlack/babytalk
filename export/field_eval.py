@@ -115,9 +115,26 @@ def run_float(items, ckpt=None):
 
 
 # ---------------------------------------------------------------- report
+# The model learned from audiobooks with British spellings; don't count them as errors.
+UK_US = {"colour": "color", "colours": "colors", "centre": "center", "centres": "centers",
+         "favour": "favor", "favourite": "favorite", "honour": "honor", "honours": "honors",
+         "behaviour": "behavior", "labour": "labor", "neighbour": "neighbor", "neighbours": "neighbors",
+         "harbour": "harbor", "humour": "humor", "rumour": "rumor", "vapour": "vapor", "armour": "armor",
+         "theatre": "theater", "metre": "meter", "metres": "meters", "litre": "liter", "fibre": "fiber",
+         "defence": "defense", "offence": "offense", "licence": "license", "grey": "gray",
+         "programme": "program", "travelled": "traveled", "travelling": "traveling", "jewellery": "jewelry",
+         "cheque": "check", "tyre": "tire", "tyres": "tires", "realise": "realize", "realised": "realized",
+         "recognise": "recognize", "recognised": "recognized", "organise": "organize", "organised": "organized",
+         "apologise": "apologize", "analyse": "analyze", "catalogue": "catalog", "dialogue": "dialog"}
+
+
+def norm(t):
+    return " ".join(UK_US.get(w, w) for w in normalize_text(t).split())
+
+
 def wer(pairs):
-    refs = [normalize_text(r) for r, _ in pairs]
-    hyps = [normalize_text(h) for _, h in pairs]
+    refs = [norm(r) for r, _ in pairs]
+    hyps = [norm(h) for _, h in pairs]
     keep = [i for i, r in enumerate(refs) if r]
     if not keep:
         return None

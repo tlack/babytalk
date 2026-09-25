@@ -1,0 +1,3 @@
+config AVM_ENABLE_BABYTALK_NIFS
+    bool "Enable BabyTalk (speech) NIFs"
+    default y

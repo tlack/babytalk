@@ -1,0 +1,24 @@
+diff --git a/src/platforms/esp32/components/avm_builtins/i2c_resource.c b/src/platforms/esp32/components/avm_builtins/i2c_resource.c
+index 34ea459..9237c38 100644
+--- a/src/platforms/esp32/components/avm_builtins/i2c_resource.c
++++ b/src/platforms/esp32/components/avm_builtins/i2c_resource.c
+@@ -21,6 +21,11 @@
+ 
+ #include <sdkconfig.h>
+ 
++// The whole file, not just the registration: otherwise the legacy I2C driver is linked in even
++// when disabled (it aborts at boot next to the new i2c_master driver) and -Werror trips on
++// the now-unused NIF definitions.
++#ifdef CONFIG_AVM_ENABLE_I2C_RESOURCE_NIFS
++
+ #include <string.h>
+ 
+ // Note: The i2c.h legacy driver will be deprecated in 5.2
+@@ -718,7 +723,6 @@ static const struct Nif i2c_end_transmission_nif =
+     .nif_ptr = nif_i2c_end_transmission
+ };
+ 
+-#ifdef CONFIG_AVM_ENABLE_I2C_RESOURCE_NIFS
+ 
+ void i2c_resource_init(GlobalContext *global)
+ {

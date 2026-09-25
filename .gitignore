@@ -20,3 +20,7 @@ __pycache__/
 backups/
 field/.venv/
 train/.venv/
+atomvm/apps/*/src/wifi_creds.erl
+atomvm/apps/*/_build/
+atomvm/apps/*/deps/
+atomvm/apps/*/*.avm

@@ -16,7 +16,7 @@ PORT="$FW/micropython/ports/esp32"
 # components/sanotts/prepare.sh.
 SANOTTS_DIR="${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}"
 TTS_ARGS=()
-EXTRA="$HERE/components;$HERE/../components"      # mpy-only + shared (mmrt, sram_pool, stt_engine)
+EXTRA="$HERE/../components"      # shared with the AtomVM firmware: mmrt, sram_pool, stt_engine, sanotts
 [ -f "$FW/micropython-camera-API/micropython.cmake" ] && EXTRA="$FW/micropython-camera-API;$EXTRA"
 if "$HERE/../components/sanotts/prepare.sh" "$SANOTTS_DIR" "$FW/sanotts_src"; then
     TTS_ARGS=(-D SANOTTS_SRC="$FW/sanotts_src")

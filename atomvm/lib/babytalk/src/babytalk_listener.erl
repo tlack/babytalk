@@ -30,7 +30,15 @@
 %% scoring; silence_ms (700) of quiet that ends a message, max_message_ms (6000);
 %% reply_ms (1500); chunk_ms (125); cues (true); cue_volume (70); voice_volume (76);
 %% length_scale (1.10: speech 10% slower than the voice's own pace, easier to follow);
-%% greeting (none: said after the wake chime, e.g. <<"I'm here, how can I help?">>).
+%% greeting (none: said after the wake chime, e.g. <<"I'm here, how can I help?">>);
+%% vad (true: only score a window when something louder than the room was heard since the
+%% last score -- a transcription takes 0.3-1.5 s of both cores, and scoring silence every
+%% second can keep the chip busy for good on slower boards); vad_factor (2: "louder" = this
+%% times the noise floor, and at least vad_min, 200 RMS).
+%%
+%% The listener traps exits, so when its owner goes (a supervisor shutting down, a crash) its
+%% terminate/2 still runs and the mic is released; otherwise the stream would keep the audio
+%% claimed and the next listener would get {error, busy} forever.
 -module(babytalk_listener).
 -behaviour(gen_server).
 -export([start_link/1, start_link/2, stop/1, say/2, ask/3, wake_on/2]).
@@ -47,6 +55,7 @@
              out_ref = none,     % none | {say | play, Ref, Item}
              then = wake,        % the phase to enter when the queue is empty
              win = [], win_bytes = 0,              % wake: the newest window_ms, newest first
+             sound = false,      % wake: something above the room was heard since the last score (vad)
              scoring = none, last = 0,             % wake: transcription in flight, its start
              msg = [], msg_bytes = 0, voiced = false, quiet = 0, peak = 0, levels = [],  % message being recorded
              floor = 300,        % noise floor (RMS), tracked while listening for the phrase
@@ -75,7 +84,9 @@ init(Opts0) ->
     Opts = maps:merge(#{spellings => [], threshold => -21.0, window_ms => 4000, every_ms => 1000,
                         silence_ms => 700, max_message_ms => 6000, reply_ms => 1500,
                         chunk_ms => 125, cues => true, cue_volume => 70, voice_volume => 76,
-                        length_scale => 1.10, greeting => none}, Opts0),
+                        length_scale => 1.10, greeting => none,
+                        vad => true, vad_factor => 2, vad_min => 200}, Opts0),
+    process_flag(trap_exit, true),
     St = #st{opts = Opts},
     case maps:get(spellings, Opts) of
         [] -> {ok, output([cue(ready)], idle, St)};              % wait for ask/3 or wake_on/2
@@ -208,8 +219,10 @@ listen(Phase, #st{opts = #{chunk_ms := C}} = St) ->
 
 %% ---------------------------------------------------------------------------- listening
 
-heard_chunk(Pcm, #st{phase = wake} = St) ->
-    maybe_score(track_floor(babytalk:rms(Pcm), window(Pcm, St)));
+heard_chunk(Pcm, #st{phase = wake, floor = F, opts = O} = St) ->
+    R = babytalk:rms(Pcm),
+    Sound = St#st.sound orelse R > max(maps:get(vad_factor, O) * F, maps:get(vad_min, O)),
+    maybe_score(track_floor(R, window(Pcm, St#st{sound = Sound})));
 heard_chunk(Pcm, #st{phase = message} = St) ->
     message_chunk(Pcm, St);
 heard_chunk(_Pcm, St) ->
@@ -229,12 +242,14 @@ trim(Cs, B, Max) ->
     [Oldest | RestRev] = lists:reverse(Cs),
     trim(lists:reverse(RestRev), B - byte_size(Oldest), Max).
 
-%% score the window about every every_ms, once it holds at least half of window_ms
+%% score the window about every every_ms, once it holds at least half of window_ms (and,
+%% with vad, only if something was heard since the last score)
+maybe_score(#st{sound = false, opts = #{vad := true}} = St) -> St;
 maybe_score(#st{scoring = none, win_bytes = B, last = Last,
                 opts = #{every_ms := E, window_ms := W}} = St) when B >= W * 16 ->
     Now = now_ms(),
     case Now - Last >= E andalso babytalk:transcribe(iolist_to_binary(lists:reverse(St#st.win))) of
-        {ok, Ref} -> St#st{scoring = Ref, last = Now};
+        {ok, Ref} -> St#st{scoring = Ref, last = Now, sound = false};
         _ -> St
     end;
 maybe_score(St) -> St.

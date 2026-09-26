@@ -9,7 +9,7 @@
 //   babytalk:stop_listening() -> ok
 //   babytalk:play_nif(Pcm16Mono, Rate, Volume) -> {ok, Ref} | {error, busy}
 //       then {babytalk_play, Ref, done | {error, Code}} (the board's speaker)
-//   babytalk:tones_nif([{Hz, Ms}], Volume) -> {ok, Ref} | {error, busy}   (same messages as play)
+//   babytalk:tones_nif([{Hz, Ms [, Level [, flat | bloop]]}], Volume) -> {ok, Ref} | {error, busy}   (same messages as play)
 //   babytalk:rms(Pcm16Mono) -> Integer
 //   babytalk:say_nif(Text, LengthPermille) -> {ok, Ref} | {error, busy}
 //       then {babytalk, Ref, {ok, Pcm24kMono, Info} | {error, Code}} (sanoTTS)
@@ -438,28 +438,40 @@ static term nif_play(Context *ctx, int argc, term argv[])
 }
 
 #define TONE_RATE 24000
-#define TONE_MAX_NOTES 16
-#define TONE_MAX_MS 3000
+#define TONE_MAX_NOTES 24
+#define TONE_MAX_MS 4000
 
-// tones_nif([{Hz, Ms}], Volume) -> {ok, Ref}: then {babytalk_play, Ref, done | {error, Code}}.
-// Soft sine notes (a third of full scale, 8 ms raised-cosine fades so nothing clicks);
-// Hz 0 is a rest. Made here: building PCM element by element in Erlang is slow on AtomVM.
+// tones_nif(Notes, Volume) -> {ok, Ref}: then {babytalk_play, Ref, done | {error, Code}}.
+// Notes: [{Hz, Ms} | {Hz, Ms, Level} | {Hz, Ms, Level, Shape}], Hz 0 = a rest, Level 0..100
+// (of the note's full loudness, a third of full scale; default 100), Shape:
+//   flat   a steady sine with 8 ms raised-cosine edges (the default: chimes, cues)
+//   bloop  soft: a 15 ms rise, then an exponential fall to near silence by the end, the
+//          pitch settling 4% as it goes -- a droplet, never a beep
+// Made here: building PCM element by element in Erlang is slow on AtomVM.
 static term nif_tones(Context *ctx, int argc, term argv[])
 {
     UNUSED(argc);
     VALIDATE_VALUE(argv[0], term_is_list);
     VALIDATE_VALUE(argv[1], term_is_integer);
     const avm_int_t vol = term_to_int(argv[1]);
-    int hz[TONE_MAX_NOTES], ms[TONE_MAX_NOTES], n = 0, total_ms = 0;
+    const term BLOOP = globalcontext_make_atom(ctx->global, "\x05" "bloop");
+    const term FLAT = globalcontext_make_atom(ctx->global, "\x04" "flat");
+    int hz[TONE_MAX_NOTES], ms[TONE_MAX_NOTES], level[TONE_MAX_NOTES], bloop[TONE_MAX_NOTES], n = 0, total_ms = 0;
     for (term l = argv[0]; term_is_nonempty_list(l); l = term_get_list_tail(l)) {
         term t = term_get_list_head(l);
-        if (n == TONE_MAX_NOTES || !term_is_tuple(t) || term_get_tuple_arity(t) != 2
-            || !term_is_integer(term_get_tuple_element(t, 0)) || !term_is_integer(term_get_tuple_element(t, 1))) {
+        const int ar = term_is_tuple(t) ? term_get_tuple_arity(t) : 0;
+        if (n == TONE_MAX_NOTES || ar < 2 || ar > 4 || !term_is_integer(term_get_tuple_element(t, 0))
+            || !term_is_integer(term_get_tuple_element(t, 1))
+            || (ar >= 3 && !term_is_integer(term_get_tuple_element(t, 2)))) {
             RAISE_ERROR(BADARG_ATOM);
         }
         hz[n] = (int) term_to_int(term_get_tuple_element(t, 0));
         ms[n] = (int) term_to_int(term_get_tuple_element(t, 1));
-        if (hz[n] < 0 || hz[n] > 8000 || ms[n] < 1) RAISE_ERROR(BADARG_ATOM);
+        level[n] = ar >= 3 ? (int) term_to_int(term_get_tuple_element(t, 2)) : 100;
+        const term shape = ar == 4 ? term_get_tuple_element(t, 3) : FLAT;
+        if (shape != BLOOP && shape != FLAT) RAISE_ERROR(BADARG_ATOM);
+        bloop[n] = shape == BLOOP;
+        if (hz[n] < 0 || hz[n] > 8000 || ms[n] < 1 || level[n] < 0 || level[n] > 100) RAISE_ERROR(BADARG_ATOM);
         total_ms += ms[n++];
     }
     if (n == 0 || total_ms > TONE_MAX_MS || vol < 0 || vol > 100) RAISE_ERROR(BADARG_ATOM);
@@ -471,16 +483,26 @@ static term nif_tones(Context *ctx, int argc, term argv[])
         atomic_store(&s_audio_claimed, 0);
         return error_tuple(&ctx->heap, atom(ctx->global, A_NO_MEMORY));
     }
-    const int fade = TONE_RATE * 8 / 1000;
+    const int fade = TONE_RATE * 8 / 1000, rise = TONE_RATE * 15 / 1000;
     int16_t *p = pcm;
     for (int k = 0; k < n; k++) {
         const int len = ms[k] * TONE_RATE / 1000;
-        const float w = 2.0f * (float) M_PI * (float) hz[k] / TONE_RATE;
+        const float amp = 10900.0f * (float) level[k] / 100.0f;
+        const float w0 = 2.0f * (float) M_PI * (float) hz[k] / TONE_RATE;
+        const float tau = (float) len / 5.0f;  // bloop: ~-43 dB by the end
+        float phase = 0.0f;
         for (int i = 0; i < len; i++) {
-            float g = 1.0f;
-            int edge = i < len - 1 - i ? i : len - 1 - i;
-            if (edge < fade) g = 0.5f - 0.5f * cosf((float) M_PI * (float) edge / (float) fade);
-            *p++ = hz[k] ? (int16_t) (10900.0f * g * sinf(w * (float) i)) : 0;
+            float g;
+            float w = w0;
+            if (bloop[k]) {
+                g = i < rise ? 0.5f - 0.5f * cosf((float) M_PI * (float) i / (float) rise) : expf(-(float) (i - rise) / tau);
+                w = w0 * (1.0f - 0.04f * (float) i / (float) len);  // settling a little in pitch
+            } else {
+                const int edge = i < len - 1 - i ? i : len - 1 - i;
+                g = edge < fade ? 0.5f - 0.5f * cosf((float) M_PI * (float) edge / (float) fade) : 1.0f;
+            }
+            phase += w;
+            *p++ = hz[k] ? (int16_t) (amp * g * sinf(phase)) : 0;
         }
     }
     return start_play(ctx, pcm, (int) (p - pcm), TONE_RATE, (int) vol);

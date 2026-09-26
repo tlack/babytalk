@@ -113,9 +113,14 @@ play(Pcm, Rate, Volume) -> ?MODULE:play_nif(Pcm, Rate, Volume).
 
 play_nif(_Pcm, _Rate, _Volume) -> erlang:nif_error(undefined).
 
-%% Play soft sine notes, e.g. a chime: [{Hz, Ms}] (Hz 0 = a rest; up to 16 notes, 3 s),
-%% Volume 0..100. Made on the board; same messages and rules as play/3.
--spec tones([{non_neg_integer(), pos_integer()}], 0..100) -> {ok, reference()} | {error, busy | no_memory}.
+%% Play sine notes, e.g. a chime: [{Hz, Ms}] (Hz 0 = a rest; up to 24 notes, 4 s), Volume
+%% 0..100. A note may also carry a Level (0..100 of its full loudness) and a Shape: flat (the
+%% default: steady, 8 ms edges) or bloop (a soft rise, then a natural fall to near silence,
+%% settling slightly in pitch -- for sounds meant to be ambient, not to call attention).
+%% Made on the board; same messages and rules as play/3.
+-type note() :: {non_neg_integer(), pos_integer()} | {non_neg_integer(), pos_integer(), 0..100}
+              | {non_neg_integer(), pos_integer(), 0..100, flat | bloop}.
+-spec tones([note()], 0..100) -> {ok, reference()} | {error, busy | no_memory}.
 tones(Notes, Volume) -> ?MODULE:tones_nif(Notes, Volume).
 
 tones_nif(_Notes, _Volume) -> erlang:nif_error(undefined).

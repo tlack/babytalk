@@ -113,7 +113,7 @@ play(Pcm, Rate, Volume) -> ?MODULE:play_nif(Pcm, Rate, Volume).
 
 play_nif(_Pcm, _Rate, _Volume) -> erlang:nif_error(undefined).
 
-%% Play sine notes, e.g. a chime: [{Hz, Ms}] (Hz 0 = a rest; up to 24 notes, 4 s), Volume
+%% Play sine notes, e.g. a chime: [{Hz, Ms}] (Hz 0 = a rest; up to 24 notes, 6 s), Volume
 %% 0..100. A note may also carry a Level (0..100 of its full loudness) and a Shape: flat (the
 %% default: steady, 8 ms edges) or bloop (a soft rise, then a natural fall to near silence,
 %% settling slightly in pitch -- for sounds meant to be ambient, not to call attention).

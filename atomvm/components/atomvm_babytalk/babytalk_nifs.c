@@ -439,7 +439,7 @@ static term nif_play(Context *ctx, int argc, term argv[])
 
 #define TONE_RATE 24000
 #define TONE_MAX_NOTES 24
-#define TONE_MAX_MS 4000
+#define TONE_MAX_MS 6000
 
 // tones_nif(Notes, Volume) -> {ok, Ref}: then {babytalk_play, Ref, done | {error, Code}}.
 // Notes: [{Hz, Ms} | {Hz, Ms, Level} | {Hz, Ms, Level, Shape}], Hz 0 = a rest, Level 0..100

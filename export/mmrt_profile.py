@@ -11,11 +11,15 @@ import collections
 import json
 import os
 import socket
+import sys
+from pathlib import Path
 
 import numpy as np
 
 from mmrt_check_model import MODEL
 from mmrt_info import parse
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+from board_config import board_host  # noqa: E402
 
 KIND = {1: "dwconv", 2: "conv1x1", 3: "mean", 4: "lut", 5: "mul", 6: "add"}
 
@@ -52,9 +56,10 @@ def prof(host, T):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default=os.environ.get("STT_HOST", "192.168.1.154"))
+    ap.add_argument("--host", help="board IP (default: $STT_HOST or board.conf)")
     ap.add_argument("--secs", type=float, nargs="+", default=[2, 4, 10])
     a = ap.parse_args()
+    a.host = board_host(a.host)
     ops = load_ops()
     for secs in a.secs:
         T = int(secs * 100) + 1

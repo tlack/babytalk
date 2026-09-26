@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Full-flash backup of a board in ROM download mode, verified on-chip (MD5).
 #
-#   tools/flash_backup.sh <name>        e.g. tools/flash_backup.sh sentry-6aa8
+#   tools/flash_backup.sh <name>        e.g. tools/flash_backup.sh my-board
 #   WAIT=300 tools/flash_backup.sh ...   seconds to wait for download mode (default 120)
 #
 # Put the board in download mode: hold BOOT, tap RESET (or unplug, hold

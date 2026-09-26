@@ -5,10 +5,10 @@
 # ///
 """Drive the on-device STT test firmware (stt/) over WiFi (TCP port 5555).
 
-    tools/stt.py pcm data/recordings/me-*.wav [--mode 1|2] [--host 192.168.1.154]
+    tools/stt.py pcm data/recordings/me-*.wav [--mode 1|2] [--host IP]
     tools/stt.py load [internal_kb] [param_copy]
 
-The board's address comes from --host, $STT_HOST, or by asking its USB console
+The board's address comes from --host, $STT_HOST, board.conf, or by asking its USB console
 (`ip`). pcm sends 16 kHz mono s16 PCM (mic1 of a stereo board recording) and prints
 the on-device transcript + timing; results append to results/<date>-stt.jsonl.
 """
@@ -26,6 +26,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from bench import git_rev  # noqa: E402
+from board_config import board_host  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PORT = 5555
@@ -86,7 +87,7 @@ def main():
     ap.add_argument("args", nargs="*")
     a = ap.parse_args()
 
-    host = a.host or board_ip(a.serial)
+    host = board_host(a.host, required=False) or board_ip(a.serial)
     b = Board(host)
     if a.cmd == "load":
         for r in b.request(" ".join(["load"] + a.args))[0]:
@@ -94,7 +95,7 @@ def main():
         return
     out = ROOT / "results" / f"{datetime.date.today()}-stt.jsonl"
     meta = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "git": git_rev(),
-            "note": a.note, "host": host}
+            "note": a.note}
     if a.sram is not None:
         b.request(f"sram {a.sram}")
     with out.open("a") as f:

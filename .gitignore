@@ -24,3 +24,6 @@ atomvm/apps/*/src/wifi_creds.erl
 atomvm/apps/*/_build/
 atomvm/apps/*/deps/
 atomvm/apps/*/*.avm
+
+# local board settings (the test board's IP): see board.conf.example
+board.conf

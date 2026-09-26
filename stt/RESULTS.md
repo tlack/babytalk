@@ -1,6 +1,6 @@
 # On-device STT results
 
-Board: Waveshare S3 cam `sentry-6aa8` (ESP32-S3, 240 MHz, 8MB octal PSRAM, 16MB flash).
+Board: Waveshare S3 cam (ESP32-S3, 240 MHz, 8MB octal PSRAM, 16MB flash).
 Model: NVIDIA Citrinet-256 (9.65M params, CTC), quantized with ESP-PPQ 1.3.11, run by
 ESP-DL 3.3.11 with weights read in place from the `model` flash partition (0x410000).
 Audio in over WiFi/TCP (`tools/stt.py`), C front end (`main/stt_core.c`, verified

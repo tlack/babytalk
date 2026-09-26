@@ -1,6 +1,6 @@
 # Phase 0 results
 
-Board: Waveshare S3 cam `sentry-6aa8` (ESP32-S3 rev v0.2, 240MHz, 16MB QIO flash
+Board: Waveshare S3 cam (ESP32-S3 rev v0.2, 240MHz, 16MB QIO flash
 @80MHz, 8MB octal PSRAM @80MHz, 64KB/64B data cache). ESP-IDF 5.5.1, bare app,
 no WiFi. Raw data: `results/2026-09-23-waveshare-s3cam.jsonl`.
 

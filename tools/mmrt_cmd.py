@@ -3,14 +3,17 @@
 
     tools/mmrt_cmd.py ktest
     tools/mmrt_cmd.py ref 1        # A/B: force portable C ops
-    STT_HOST=192.168.1.154 tools/mmrt_cmd.py info
+    tools/mmrt_cmd.py info          # board address: $STT_HOST or board.conf
 """
 import json
 import os
 import socket
 import sys
 
-host = os.environ.get("STT_HOST", "192.168.1.154")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from board_config import board_host  # noqa: E402
+
+host = board_host()
 s = socket.create_connection((host, 5555), timeout=900)
 f = s.makefile("rb")
 s.sendall((" ".join(sys.argv[1:]) + "\n").encode())

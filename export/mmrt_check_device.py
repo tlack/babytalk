@@ -12,11 +12,14 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
 import numpy as np
 
 from mmrt_check_model import ALLOC, FREE, MODEL, build
 from mmrt_info import MMRT
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+from board_config import board_host  # noqa: E402
 
 
 def fnv(y, V):
@@ -49,10 +52,11 @@ def board_feats(host, feats):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default=os.environ.get("STT_HOST", "192.168.1.154"))
+    ap.add_argument("--host", help="board IP (default: $STT_HOST or board.conf)")
     ap.add_argument("--model", default=str(MODEL), help="the image flashed to the board's model partition")
     ap.add_argument("clips", nargs="*", default=["me-hello-world", "me-we-the-people", "1089-134686-0000"])
     a = ap.parse_args()
+    a.host = board_host(a.host)
     lib = build()
     libc = ctypes.CDLL(None)
     libc.malloc.restype = ctypes.c_void_p

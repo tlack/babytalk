@@ -1,9 +1,12 @@
 """Send WAV clips to the board's stt_server (atomvm/apps/stt_server) over WiFi TCP and print
 its transcripts, next to the host int4 transcript from a field_eval run when there is one.
 
-    python3 atomvm/tools/stt_client.py HOST clip.wav ...
-    python3 atomvm/tools/stt_client.py HOST --field 6      # 6 field clips with host int4 transcripts
-    python3 atomvm/tools/stt_client.py HOST --field 8 --save atomvm.json   # keep the transcripts
+    python3 atomvm/tools/stt_client.py clip.wav ...
+    python3 atomvm/tools/stt_client.py --field 6      # 6 field clips with host int4 transcripts
+    python3 atomvm/tools/stt_client.py --field 8 --save atomvm.json   # keep the transcripts
+
+The board's address: --host, else $STT_HOST, else board.conf at the repo root (see
+board.conf.example).
 
 WAVs must be 16 kHz int16; channel 0 of a multichannel file is sent (as the board's engine does).
 """
@@ -19,6 +22,8 @@ import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+from board_config import board_host  # noqa: E402
 
 
 def pcm_of(path):
@@ -55,12 +60,13 @@ def connect(host, port):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("host")
+    ap.add_argument("--host", help="board IP (default: $STT_HOST or board.conf)")
     ap.add_argument("wavs", nargs="*")
     ap.add_argument("--field", type=int, default=0, metavar="N")
     ap.add_argument("--port", type=int, default=5555)
     ap.add_argument("--save", metavar="JSON", help="write {clip file name: board transcript} here")
     a = ap.parse_args()
+    a.host = board_host(a.host)
     clips = [(Path(p), None) for p in a.wavs] + (field_clips(a.field) if a.field else [])
     s = f = None
     same, saved = 0, {}

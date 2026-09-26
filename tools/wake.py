@@ -22,6 +22,9 @@ import socket
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from board_config import board_host  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent
 RED, DIM, BOLD, GREEN, YEL, RESET = "\033[31m", "\033[2m", "\033[1m", "\033[32m", "\033[33m", "\033[0m"
 PLAIN_THRESHOLD = -15.0  # plain spelling, no TTS evaluation: a middle-of-the-road guess
@@ -66,12 +69,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("text", nargs="?", help="wake phrase (default: the --phrase file)")
     ap.add_argument("--enroll", type=int, default=0, metavar="N", help="say the phrase N times first (your voice)")
-    ap.add_argument("--host", default=os.environ.get("STT_HOST", "192.168.1.154"))
+    ap.add_argument("--host", help="board IP (default: $STT_HOST or board.conf)")
     ap.add_argument("--phrase", default=str(ROOT / "wake_phrases" / "wake_up_tomato_face.json"))
     ap.add_argument("--spell", action="append", help="spelling(s) to use instead of a phrase file")
     ap.add_argument("--threshold", type=float, default=None)
     ap.add_argument("--quiet", action="store_true", help="hide the per-stretch SEG lines")
     a = ap.parse_args()
+    a.host = board_host(a.host)
 
     if a.spell:
         name, spellings, thr = a.spell[0], a.spell, PLAIN_THRESHOLD

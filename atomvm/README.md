@@ -160,7 +160,8 @@ the official release image, so no host build of AtomVM is needed.
 | model | 0x590000 | 6 MB | the int4 `.mmrt` model |
 
 Apps: `apps/mmrt_test` (MMRT test vectors from `gen_vectors.py` + benchmarks),
-`apps/stt_server` + `tools/stt_client.py` (send WAVs over WiFi, get transcripts back),
+`apps/stt_server` + `tools/stt_client.py` (send WAVs over WiFi, get transcripts back; the
+board's address comes from `--host`, `$STT_HOST` or `board.conf`, see `board.conf.example`),
 `apps/tts_demo` (speech out, speed, PCM hashes), `apps/listen_demo` (the full conversation),
 `apps/wakeword_demo` (teach it your own wake phrase by voice -- "Did you say ...?" -- then
 talk to it; the phrase is stored as the model's own spelling of how you said it). Apps that use WiFi need

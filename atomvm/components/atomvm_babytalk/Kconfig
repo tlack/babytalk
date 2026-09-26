@@ -14,6 +14,17 @@ config BABYTALK_RESERVE_AT_BOOT
         babytalk:reserve_at_boot(true) (NVS namespace "babytalk", key "reserve") and a
         restart. The NVS value, when present, overrides this default either way.
 
+config BABYTALK_STACKS_IN_PSRAM
+    bool "BabyTalk's task stacks in PSRAM"
+    default n
+    depends on AVM_ENABLE_BABYTALK_NIFS && SPIRAM && FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    help
+        The worker (12 KB: transcription and synthesis) and the audio task (4 KB) keep their
+        stacks in PSRAM instead of internal RAM. On a board whose internal RAM is short (a
+        display, TLS, the engines' pool), those 16 KB decide whether the mic's DMA buffers and
+        the speech engine's scratch fit. The hot data is in the engines' SRAM pool either way;
+        a stack in PSRAM costs little.
+
 choice BABYTALK_BOARD
     prompt "BabyTalk audio board"
     default BABYTALK_BOARD_WAVESHARE_S3_CAM

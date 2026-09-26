@@ -730,8 +730,15 @@ static void babytalk_init(GlobalContext *global)
     }
     s_jobs = xQueueCreate(1, sizeof(job_t));
     s_audio_go = xSemaphoreCreateBinary();
-    if (!s_jobs || !s_audio_go || xTaskCreatePinnedToCore(worker, "babytalk", 12 * 1024, NULL, 5, NULL, 1) != pdPASS
-        || xTaskCreatePinnedToCore(audio_task, "babytalk_audio", 4 * 1024, NULL, 6, NULL, 1) != pdPASS) {
+#ifdef CONFIG_BABYTALK_STACKS_IN_PSRAM
+    // (16 KB of internal RAM back: see Kconfig)
+    const UBaseType_t caps = MALLOC_CAP_SPIRAM;
+#else
+    const UBaseType_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+#endif
+    if (!s_jobs || !s_audio_go
+        || xTaskCreatePinnedToCoreWithCaps(worker, "babytalk", 12 * 1024, NULL, 5, NULL, 1, caps) != pdPASS
+        || xTaskCreatePinnedToCoreWithCaps(audio_task, "babytalk_audio", 4 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) {
         ESP_LOGE(TAG, "could not start the babytalk tasks");
     }
 }

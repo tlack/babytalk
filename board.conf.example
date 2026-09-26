@@ -2,3 +2,7 @@
 # the laptop-side tools (tools/*.py, export/*_device.py, export/mmrt_profile.py).
 # $STT_HOST or a --host argument override it.
 host = 192.168.1.50
+
+# The board's MAC: tools/flash.sh refuses to write to any other chip on the serial port.
+# Read it with: esptool.py --port /dev/ttyACM0 read_mac
+mac = aa:bb:cc:dd:ee:ff

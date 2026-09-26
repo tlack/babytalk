@@ -145,6 +145,10 @@ cd atomvm/apps/listen_demo && mix deps.get && mix atomvm.packbeam
 esptool.py --chip esp32s3 write_flash 0xA90000 listen_demo.avm
 ```
 
+If boards share a serial port, flash with `tools/flash.sh` instead of esptool: same
+offset/file arguments, but it reads the chip's MAC first and refuses to write unless it matches
+the `mac` in `board.conf`.
+
 `build.sh` clones the pinned AtomVM tag, applies `patches/`, links in `components/` (ours and
 the shared `mmrt`, `sram_pool`, `stt_engine`, `sanotts` from the repo root), prepares the
 sanoTTS sources from a checkout (`SANOTTS_DIR`, default `~/build/tts/sanoTTS`; without one the

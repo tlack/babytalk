@@ -167,7 +167,7 @@ Tested from the board's internal filesystem (not an SD card): installing and ver
 | `train/`, `field/`, `datagen/` | fine-tuning, field recording sessions, synthetic speech |
 | `tools/` | laptop tools that drive a board over WiFi or USB (transcribe, record, wake phrases) |
 | `models/` | the int4 and int8 model images |
-| `docs/` | board notes (`BOARD_WAVESHARE_S3_CAM.md`) and project history |
+| `docs/` | [`MODELS.md`](docs/MODELS.md) (using, building and replacing the models; other languages), [`ROADMAP.md`](docs/ROADMAP.md), board notes, project history |
 
 ## Performance and memory
 
@@ -349,6 +349,9 @@ ok = babytalk:speak([<<"You said: ">>, Text]).
   it needs (6.7 KB left). The AtomVM firmware keeps ~42 KB with WiFi up and can.
 
 ## Future work
+
+The fuller list, with what each item takes: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 
 - Rebuild the board's int8 and int4 models from the fine-tuned model, then train with the
   8- and 4-bit arithmetic simulated (quantization-aware training) to recover their losses.

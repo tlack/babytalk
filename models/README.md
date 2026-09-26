@@ -18,6 +18,8 @@ bdb6be064984b86af7c7ead182b2852420edaae252733264cd76f81bad0f8d47  citrinet256_in
 6fd16badafdb2d02358682faec3055de93e011958d6b1431222ef27c66b8b493  citrinet256_int8.mmrt
 ```
 
+Your own fine-tuned variants, other languages, other voices: [`docs/MODELS.md`](../docs/MODELS.md).
+
 ## License and attribution
 
 These files are derived from **"stt_en_citrinet_256_ls" by NVIDIA**, licensed under

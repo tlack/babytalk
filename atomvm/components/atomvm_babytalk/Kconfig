@@ -1,3 +1,34 @@
 config AVM_ENABLE_BABYTALK_NIFS
     bool "Enable BabyTalk (speech) NIFs"
     default y
+
+config BABYTALK_RESERVE_AT_BOOT
+    bool "Reserve the engines' 84.5 KB of internal RAM at boot"
+    default y
+    depends on AVM_ENABLE_BABYTALK_NIFS
+    help
+        Transcription and speech need one contiguous 84.5 KB block of internal SRAM, which
+        only exists early, before WiFi and the rest fragment the heap: so BabyTalk takes it
+        when the VM starts. On a board where that RAM is needed for other things (a display's
+        DMA buffers, say) turn this off; an app can then opt in at run time with
+        babytalk:reserve_at_boot(true) (NVS namespace "babytalk", key "reserve") and a
+        restart. The NVS value, when present, overrides this default either way.
+
+choice BABYTALK_BOARD
+    prompt "BabyTalk audio board"
+    default BABYTALK_BOARD_WAVESHARE_S3_CAM
+    depends on AVM_ENABLE_BABYTALK_NIFS
+    help
+        Which board_audio.c drives the microphone and speaker. The engines and NIFs are
+        board-independent; only board_audio.h's functions touch the hardware.
+
+config BABYTALK_BOARD_WAVESHARE_S3_CAM
+    bool "Waveshare ESP32-S3-CAM (ES7210 mics, ES8311 + NS4150B speaker, CH32V003 expander)"
+
+config BABYTALK_BOARD_CUSTOM
+    bool "Custom: another component implements board_audio.h"
+    help
+        board_audio.c is left out; some other component in the firmware (your board's) must
+        define every function in board_audio.h. That component can include board_audio.h by
+        adding atomvm_babytalk to its REQUIRES.
+endchoice

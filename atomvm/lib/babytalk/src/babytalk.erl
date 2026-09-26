@@ -7,7 +7,7 @@
 -module(babytalk).
 -export([transcribe/1, transcribe_sync/2, listen/1, stop_listening/0, record/1,
          say/1, say/2, say_sync/2, say_sync/3, play/2, play/3, tones/2, rms/1, speak/1, speak/2,
-         phrase/1, cache/1, info/0, heap_info/0]).
+         phrase/1, cache/1, info/0, heap_info/0, reserve_at_boot/1]).
 %% AtomVM binds NIFs only to external calls (Module:Fun), so NIFs wrapped here are exported
 %% and called as ?MODULE:name_nif(...).
 -export([transcribe_nif/1, listen_nif/1, say_nif/2, play_nif/3, tones_nif/2]).
@@ -60,7 +60,7 @@ record(Secs) ->
     end.
 
 collect(Ref, Want, Have, Acc) when Have >= Want ->
-    ok = stop_listening(),
+    ok = ?MODULE:stop_listening(),
     drain(Ref),
     <<Pcm:Want/binary, _/binary>> = iolist_to_binary(lists:reverse(Acc)),
     {ok, Pcm};
@@ -68,7 +68,7 @@ collect(Ref, Want, Have, Acc) ->
     receive
         {babytalk_mic, Ref, Pcm} when is_binary(Pcm) -> collect(Ref, Want, Have + byte_size(Pcm), [Pcm | Acc]);
         {babytalk_mic, Ref, Other} -> {error, Other}
-    after 5000 -> ok = stop_listening(), {error, timeout}
+    after 5000 -> ok = ?MODULE:stop_listening(), {error, timeout}
     end.
 
 %% up to the stream's last message
@@ -155,5 +155,15 @@ cache(_Bytes) -> erlang:nif_error(undefined).
 -spec info() -> [{atom(), integer()}].
 info() -> erlang:nif_error(undefined).
 
--spec heap_info() -> [{internal_free | internal_largest | psram_free | psram_largest, integer()}].
+%% Memory facts; pool_bytes is the engines' internal-RAM block (0: not reserved at boot, so no
+%% transcription or speech -- see reserve_at_boot/1).
+-spec heap_info() -> [{internal_free | internal_largest | psram_free | psram_largest | pool_bytes, integer()}].
 heap_info() -> erlang:nif_error(undefined).
+
+%% Whether BabyTalk takes its 84.5 KB of internal RAM when the VM next starts (it has to be
+%% early, before the heap fragments). Stored in NVS (namespace babytalk, key reserve); takes
+%% effect after a restart; overrides the firmware's CONFIG_BABYTALK_RESERVE_AT_BOOT. Boards
+%% short of internal RAM build with it off and let the app opt in.
+-spec reserve_at_boot(boolean()) -> ok | {error, term()}.
+reserve_at_boot(On) when is_boolean(On) ->
+    esp:nvs_set_binary(babytalk, reserve, case On of true -> <<1>>; false -> <<0>> end).

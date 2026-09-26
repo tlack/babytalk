@@ -62,7 +62,7 @@ static int exp_pin(int pin, int on)
 
 static int es7210_init(i2c_master_dev_handle_t d, int gain)
 {
-    if (gain < 0) gain = 0;
+    if (gain < 0) gain = 14;  // the board's default: as the field recordings
     if (gain > 14) gain = 14;
     static const uint8_t seq1[][2] = {
         {0x00, 0xFF}, {0x00, 0x32},              // soft reset

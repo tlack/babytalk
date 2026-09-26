@@ -4,11 +4,11 @@
 //   babytalk:transcribe_nif(Pcm) -> {ok, Ref} | {error, busy | no_memory}
 //       then the caller gets {babytalk, Ref, {ok, Text, Info} | {error, Code}}
 //   babytalk:listen_nif(ChunkMs) -> {ok, Ref} | {error, busy}
-//       then {babytalk_mic, Ref, Pcm16Mono} every ChunkMs (ES7210 mic 1, 16 kHz, gapless)
+//       then {babytalk_mic, Ref, Pcm16Mono} every ChunkMs (the board's mic, 16 kHz, gapless)
 //       until stop_listening(), then {babytalk_mic, Ref, stopped}; or {babytalk_mic, Ref, {error, Code}}
 //   babytalk:stop_listening() -> ok
 //   babytalk:play_nif(Pcm16Mono, Rate, Volume) -> {ok, Ref} | {error, busy}
-//       then {babytalk_play, Ref, done | {error, Code}} (ES8311 + NS4150B speaker)
+//       then {babytalk_play, Ref, done | {error, Code}} (the board's speaker)
 //   babytalk:tones_nif([{Hz, Ms}], Volume) -> {ok, Ref} | {error, busy}   (same messages as play)
 //   babytalk:rms(Pcm16Mono) -> Integer
 //   babytalk:say_nif(Text, LengthPermille) -> {ok, Ref} | {error, busy}
@@ -16,7 +16,8 @@
 //   babytalk:phrase(Spellings) -> {ok, Sequences} | {error, busy | no_memory}
 //   babytalk:cache(Bytes) -> {ok, Cached} | {error, busy | Code}
 //   babytalk:info() -> [{Key, Value}]
-//   babytalk:heap_info() -> [{internal_free, B}, {internal_largest, B}, {psram_free, B}, {psram_largest, B}]
+//   babytalk:heap_info() -> [{internal_free, B}, {internal_largest, B}, {psram_free, B}, {psram_largest, B},
+//                            {pool_bytes, B}]   (pool_bytes: 0 when the engines' block wasn't reserved at boot)
 //
 // Inference (0.3-2 s) runs on our own FreeRTOS task, never on a scheduler: AtomVM has no
 // dirty NIFs. The model is the "model" flash partition (components/stt_engine).
@@ -41,6 +42,8 @@
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
@@ -78,6 +81,7 @@ static const char *const A_INTERNAL_FREE = "\x0D" "internal_free";
 static const char *const A_INTERNAL_LARGEST = "\x10" "internal_largest";
 static const char *const A_PSRAM_FREE = "\x0A" "psram_free";
 static const char *const A_PSRAM_LARGEST = "\x0D" "psram_largest";
+static const char *const A_POOL_BYTES = "\x0A" "pool_bytes";
 
 static term atom(GlobalContext *g, const char *a) { return globalcontext_make_atom(g, a); }
 
@@ -106,9 +110,10 @@ typedef struct {
     uint64_t ref;
 } job_t;
 
-#define MIC_GAIN 14  // ES7210 PGA step (~3 dB each), as the field recordings
+#define MIC_GAIN (-1)  // the board's default (board_audio.h)
 
 static GlobalContext *s_glb;
+static bool s_reserved;  // the SRAM pool was taken at boot
 static QueueHandle_t s_jobs;
 
 static term error_tuple(Heap *h, term reason)
@@ -622,14 +627,15 @@ static term nif_heap_info(Context *ctx, int argc, term argv[])
 {
     UNUSED(argc);
     UNUSED(argv);
-    const char *names[4] = {A_INTERNAL_FREE, A_INTERNAL_LARGEST, A_PSRAM_FREE, A_PSRAM_LARGEST};
-    const avm_int_t vals[4] = {
+    const char *names[5] = {A_INTERNAL_FREE, A_INTERNAL_LARGEST, A_PSRAM_FREE, A_PSRAM_LARGEST, A_POOL_BYTES};
+    const avm_int_t vals[5] = {
         (avm_int_t) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (avm_int_t) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
         (avm_int_t) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         (avm_int_t) heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+        s_reserved ? SRAM_POOL_BYTES : 0,
     };
-    return proplist(ctx, names, vals, 4);
+    return proplist(ctx, names, vals, 5);
 }
 
 #define NIF(name, fn) static const struct Nif name##_nif = {.base.type = NIFFunctionType, .nif_ptr = fn}
@@ -665,14 +671,41 @@ static const struct Nif *babytalk_get_nif(const char *name)
     return NULL;
 }
 
+// Whether to take the pool at boot: NVS babytalk/reserve (a binary, <<0>> or <<1>>, written by
+// babytalk:reserve_at_boot/1) if present, else CONFIG_BABYTALK_RESERVE_AT_BOOT
+static bool reserve_at_boot(void)
+{
+#ifdef CONFIG_BABYTALK_RESERVE_AT_BOOT
+    bool want = true;
+#else
+    bool want = false;
+#endif
+    nvs_flash_init();  // (AtomVM's own NVS init may not have run yet; a second init is harmless)
+    nvs_handle_t h;
+    if (nvs_open("babytalk", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t v;
+        size_t n = 1;
+        if (nvs_get_blob(h, "reserve", &v, &n) == ESP_OK && n == 1) want = v != 0;
+        nvs_close(h);
+    }
+    return want;
+}
+
 // At VM start, before any Erlang code (and so before WiFi) takes internal RAM: reserve the
-// engine's 84.5 KB contiguous SRAM block and start the worker. Inference runs on core 1 at
+// engine's 84.5 KB contiguous SRAM block (unless told not to: reserve_at_boot) and start the
+// worker. Without the block, transcription and speech return errors; mic, speaker and tones work. Inference runs on core 1 at
 // the schedulers' priority (5), so it time-slices with the core-1 scheduler; mmrt's own
 // helper task takes core 0 during the big layers. The audio task (see above) sits at 6.
 static void babytalk_init(GlobalContext *global)
 {
     s_glb = global;
-    if (sram_pool_reserve()) ESP_LOGE(TAG, "could not reserve the SRAM pool: transcription will fail");
+    if (!reserve_at_boot()) {
+        ESP_LOGI(TAG, "SRAM pool not reserved (babytalk:reserve_at_boot/1): no transcription or speech");
+    } else if (sram_pool_reserve()) {
+        ESP_LOGE(TAG, "could not reserve the SRAM pool: transcription will fail");
+    } else {
+        s_reserved = true;
+    }
     s_jobs = xQueueCreate(1, sizeof(job_t));
     s_audio_go = xSemaphoreCreateBinary();
     if (!s_jobs || !s_audio_go || xTaskCreatePinnedToCore(worker, "babytalk", 12 * 1024, NULL, 5, NULL, 1) != pdPASS

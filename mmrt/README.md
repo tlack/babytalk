@@ -83,7 +83,7 @@ const int8_t *logits = mmrt_run(&m, features, T_in, &T_out, alloc, release);  //
 enables the PSRAM cache. Build with `MMRT_S3` defined for the S3 kernels. Without it you
 get the portable C reference, which is how the PC tools run the same file. The complete
 speech-to-text pipeline around it (audio features, decoding, wake phrases) is
-`mpy/components/stt_engine/`.
+`components/stt_engine/`.
 
 | file | what |
 |---|---|

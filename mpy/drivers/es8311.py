@@ -9,7 +9,7 @@
 #
 # machine.I2S clocks MCLK at 256*Fs natively, so the dividers below are constants and
 # the sample rate becomes a property of the I2S peripheral alone — change the rate and
-# the codec needs no retuning. Proof + the derivation: BOARD_WAVESHARE_S3_CAM.md §4.
+# the codec needs no retuning. Proof + the derivation: docs/BOARD_WAVESHARE_S3_CAM.md section 4.
 #
 # The chip is an I2S SLAVE here: the ESP32 drives MCLK/BCLK/LRCK.
 #

@@ -65,9 +65,9 @@ a 4 s window scored once a second in the background, then the command after the 
 | model time, no cache | 586 ms (front end 195, decode 1) |
 | model time, 6MB cache | 546 ms |
 | wake-phrase scoring (512 sequences) | +153 ms |
-| internal RAM free | 174 KB at boot, 133 KB after `stt` opens (+32KB staging buffer, task stacks) |
+| internal RAM free | 137 KB at boot (with `tts`'s static buffers); ~42 KB for your program once the shared 84.5 KB pool is reserved (`tts.reserve()`); with WiFi up as well, 6.7 KB -- too little for `stt` to open, so transcribe with WiFi off |
 | PSRAM free | 7.98 MB without cache, 1.99 MB with the 6MB cache |
-| app image | 1.97 MB (MicroPython + camera + mp_jpeg + stt) |
+| app image | 3.6 MB (MicroPython + camera + mp_jpeg + stt + tts; 1.97 MB without tts) |
 
 Background mode under asyncio: a 20 ms asyncio ticker keeps running while a 4 s clip is
 transcribed (600 ms model time). A tight `time.sleep_ms(10)` poll loop doubles model time
@@ -81,7 +81,8 @@ transcribed (600 ms model time). A tight `time.sleep_ms(10)` poll loop doubles m
 | 0x410000 | 6 MB | `model` — `data/models/mmrt/citrinet256_int4.mmrt` (5.99 MB) |
 | 0xA10000 | 6 MB | `vfs`, created by MicroPython at boot |
 
-An int8 model (9.78 MB) needs a 10 MB model partition and leaves ~3 MB of filesystem.
+An int8 model (9.78 MB) needs a 10 MB model partition (`partitions-stt-int8.csv`) and leaves
+~2 MB of filesystem.
 
 ## Build
 

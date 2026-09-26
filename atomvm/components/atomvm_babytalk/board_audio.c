@@ -1,7 +1,7 @@
 // Waveshare ESP32-S3-CAM audio drivers (see board_audio.h). Register sequences: ES7210 from
 // stt/main/mic.c (a port of Watchtower's proven es7210.py), ES8311 from mpy/drivers/es8311.py
 // (Espressif's driver with the clock table collapsed to its MCLK = 256 x Fs row). Pin roles:
-// BOARD_WAVESHARE_S3_CAM.md (P6 rail / P4 amp confirmed by ear, 2026-09-21).
+// docs/BOARD_WAVESHARE_S3_CAM.md (P6 rail / P4 amp confirmed by ear, 2026-09-21).
 //
 // ES7210 and ES8311 register sequences derived from Espressif's es7210 and es8311 drivers
 // (github.com/espressif/esp-bsp, components/es7210, es8311), Copyright Espressif Systems

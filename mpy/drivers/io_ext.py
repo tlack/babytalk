@@ -2,7 +2,7 @@
 #
 # A tiny RISC-V MCU acting as an 8-bit IO expander + 1 PWM + 1 ADC, sitting at 0x24 on
 # the shared system I2C bus. It matters to us because the NS4150B amplifier enable and
-# the audio rail are expander pins, NOT GPIOs — BOARD_WAVESHARE_S3_CAM.md §3.2.
+# the audio rail are expander pins, NOT GPIOs — docs/BOARD_WAVESHARE_S3_CAM.md section 3.2.
 #
 # Register map (vendor io_extension.c):
 #   0x02 <mask>  IO direction, 1 = output

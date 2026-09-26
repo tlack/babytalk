@@ -1,5 +1,10 @@
 # On-device STT results
 
+> **Superseded (history).** This is the first on-device run, 2026-09-23, on ESP-DL. The
+> engine now runs on MMRT, about 6x faster: 4 s of speech in ~0.8 s (RTF ~0.2) instead of
+> RTF 1.33 -- current numbers in the root README ("Performance and memory") and
+> `mmrt/README.md`.
+
 Board: Waveshare S3 cam (ESP32-S3, 240 MHz, 8MB octal PSRAM, 16MB flash).
 Model: NVIDIA Citrinet-256 (9.65M params, CTC), quantized with ESP-PPQ 1.3.11, run by
 ESP-DL 3.3.11 with weights read in place from the `model` flash partition (0x410000).

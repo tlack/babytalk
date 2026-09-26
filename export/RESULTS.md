@@ -1,5 +1,9 @@
 # Citrinet-256 on the host: float port → static ONNX → ESP-PPQ (esp32s3)
 
+> The ESP-PPQ / ESP-DL sections below are the project's first pipeline (2026-09-23), kept as
+> history: the board now runs MMRT at each clip's exact length (no static 16 s window), and
+> int8/int4 rather than w8a16. The last section, "4-bit weights", reflects the current models.
+
 Question: what WER does NVIDIA Citrinet-256 (`stt_en_citrinet_256_ls`, 9.8M params, CTC,
 WordPiece vocab 256 + blank) get on LibriSpeech test-clean (a) as our plain-PyTorch port,
 (b) quantized the way ESP-DL would run it on an ESP32-S3, simulated with ESP-PPQ 1.3.11?
@@ -138,6 +142,8 @@ Per-utterance hypotheses: `data/results/*.tsv` (uid, duration, ref, hyp); summar
 `data/results/exponents_<tag>.tsv`. Data: LibriSpeech test-clean + dev-clean in `data/librispeech/`.
 
 ## Board mic recordings (data/recordings, 2026-09-23)
+
+(ESP-DL era: the static-window and w8a16 conclusions here were overtaken by MMRT.)
 
 9 live-voice clips of the user speaking to the Waveshare board's ES7210 mic 1
 (16 kHz, gain 14, normal speaking range; 65 words total) plus one LibriSpeech clip

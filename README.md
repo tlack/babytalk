@@ -153,6 +153,22 @@ model_tools.install("/sd/citrinet256_int4.mmrt")   # writes, verifies, resets th
 Tested from the board's internal filesystem (not an SD card): installing and verifying the
 6 MB int4 model took 48 seconds.
 
+### What's where
+
+| folder | what |
+|---|---|
+| `mmrt/` | the int8/int4 inference runtime (C + ESP32-S3 SIMD assembly) |
+| `components/` | ESP-IDF components shared by the firmwares: `mmrt`, `stt_engine`, `sram_pool`, `sanotts` |
+| `mpy/` | the MicroPython firmware: `stt` and `tts` modules, codec drivers, examples |
+| `atomvm/` | the AtomVM (Erlang/Elixir) firmware: NIFs, libraries, demo apps |
+| `stt/` | a plain ESP-IDF test firmware, where the engine is developed and measured |
+| `bench/` | ESP32-S3 micro-benchmarks (memory, kernels, the mic) |
+| `export/` | PC side: model port, quantization, the `.mmrt` exporter, bit-exact checks |
+| `train/`, `field/`, `datagen/` | fine-tuning, field recording sessions, synthetic speech |
+| `tools/` | laptop tools that drive a board over WiFi or USB (transcribe, record, wake phrases) |
+| `models/` | the int4 and int8 model images |
+| `docs/` | board notes (`BOARD_WAVESHARE_S3_CAM.md`) and project history |
+
 ## Performance and memory
 
 Measured on the Waveshare ESP32-S3-CAM, from MicroPython, int4 model. Times include the
@@ -329,6 +345,8 @@ ok = babytalk:speak([<<"You said: ">>, Text]).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
 - Tested on one board. Another ESP32-S3 board needs its own pins and audio codec driver.
 - Listening and speaking take turns (they share one block of internal RAM).
+- Under MicroPython, speech to text can't run while WiFi is on: WiFi takes the internal RAM
+  it needs (6.7 KB left). The AtomVM firmware keeps ~42 KB with WiFi up and can.
 
 ## Future work
 

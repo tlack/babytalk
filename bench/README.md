@@ -60,4 +60,4 @@ note, so results are comparable across firmware changes. Commit the jsonl files.
 - Same app with WiFi + ESP-SR AFE linked, to re-run `mem` for real-firmware headroom.
 - ESP-DL conv block from an exported `.espdl` model.
 - AFE + VAD + log-mel CPU cost on the ES7210 dual-mic input.
-- Bloom-filter connectivity layer kernel (IDEAS.md) vs int8 `fc`.
+- Bloom-filter connectivity layer kernel (`docs/historical/IDEAS.md`) vs int8 `fc`.

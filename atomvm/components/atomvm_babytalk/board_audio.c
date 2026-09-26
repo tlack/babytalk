@@ -159,8 +159,8 @@ int board_audio_rx_start(void)
     if (!s_ready) return -1;
     if (!s_rx) {
         i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-        cc.dma_frame_num = 512;
-        cc.dma_desc_num = 8;  // 256 ms of slack
+        cc.dma_frame_num = 320;
+        cc.dma_desc_num = 6;  // 120 ms of slack in 7.5 KB of internal DMA RAM (a camera, WiFi and TLS want theirs)
         if (i2s_new_channel(&cc, NULL, &s_rx) != ESP_OK) return -5;
         i2s_std_config_t sc = std_cfg(MIC_RATE, I2S_GPIO_UNUSED, PIN_DIN);
         if (i2s_channel_init_std_mode(s_rx, &sc) != ESP_OK) {
@@ -233,7 +233,7 @@ int board_audio_play(const int16_t *mono, int n, int rate, int volume)
     i2s_chan_handle_t tx;
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     cc.dma_frame_num = 480;
-    cc.dma_desc_num = 8;  // 160 ms at 24 kHz
+    cc.dma_desc_num = 4;  // 80 ms at 24 kHz in 7.5 KB (the audio task runs at priority 6: enough)
     cc.auto_clear = true;  // underrun -> silence, not a repeated buffer
     if (i2s_new_channel(&cc, &tx, NULL) != ESP_OK) return -5;
     i2s_std_config_t sc = std_cfg(rate, PIN_DOUT, I2S_GPIO_UNUSED);

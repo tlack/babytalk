@@ -41,7 +41,7 @@
 %% claimed and the next listener would get {error, busy} forever.
 -module(babytalk_listener).
 -behaviour(gen_server).
--export([start_link/1, start_link/2, stop/1, say/2, ask/3, wake_on/2]).
+-export([start_link/1, start_link/2, stop/1, say/2, chime/2, ask/3, wake_on/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(CUES, #{ready => [{587, 90}, {0, 30}, {880, 140}],      % D5 -> A5
@@ -73,6 +73,10 @@ stop(Server) -> gen_server:stop(Server).
 %% Speak Text (iodata) through the speaker; listening pauses meanwhile.
 say(Server, Text) -> gen_server:cast(Server, {say, iolist_to_binary(Text)}).
 
+%% Play a chime ([{Hz, Ms}], as babytalk:tones/2) at the cue volume, in turn with speech;
+%% listening pauses meanwhile.
+chime(Server, Notes) -> gen_server:cast(Server, {chime, Notes}).
+
 %% Say Prompt, chime, record the answer (until silence, or exactly #{ms => Ms}) and report
 %% {answer, Text}; then wait.
 ask(Server, Prompt, Opts) -> gen_server:cast(Server, {ask, iolist_to_binary(Prompt), Opts}).
@@ -102,6 +106,10 @@ handle_cast({say, Text}, #st{phase = idle} = St) ->
     {noreply, output([{say, Text}], St#st.then, St)};
 handle_cast({say, Text}, #st{phase = Phase} = St) ->
     {noreply, output([{say, Text}], Phase, St)};
+handle_cast({chime, Notes}, #st{phase = idle} = St) ->
+    {noreply, output([{tones, Notes}], St#st.then, St)};
+handle_cast({chime, Notes}, #st{phase = Phase} = St) ->
+    {noreply, output([{tones, Notes}], Phase, St)};
 handle_cast({ask, Prompt, Opts}, St) ->
     Then = {message, answer, maps:get(ms, Opts, none)},
     {noreply, output([{say, Prompt}, cue(wake)], Then, St#st{awaiting_reply = false})};
@@ -186,6 +194,7 @@ pump(#st{out = [], then = Then} = St) -> enter(Then, St);
 pump(#st{out = [Item | Rest], opts = Opts} = St) ->
     Started = case Item of
                   {cue, Name} -> {play, babytalk:tones(maps:get(Name, ?CUES), maps:get(cue_volume, Opts))};
+                  {tones, Notes} -> {play, babytalk:tones(Notes, maps:get(cue_volume, Opts))};
                   {say, Text} -> {say, babytalk:say(Text, #{length_scale => maps:get(length_scale, Opts)})}
               end,
     case Started of

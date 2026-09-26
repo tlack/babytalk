@@ -1,0 +1,11 @@
+menu "BabyTalk engine memory (sram_pool)"
+config SRAM_POOL_IN_PSRAM
+    bool "Put the engines' shared 84.5 KB block in PSRAM"
+    default n
+    help
+        The speech engines (MMRT's staging buffers, sanoTTS's arena) share one 84.5 KB block,
+        by default in internal SRAM, where they run fastest. On a board short of internal RAM
+        (a camera, a display, WiFi and TLS all want it) put it in PSRAM instead: everything
+        works the same, a little slower (octal PSRAM) or noticeably slower (quad PSRAM).
+        The block can then also be taken at any time, not only at boot.
+endmenu

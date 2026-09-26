@@ -1,0 +1,4 @@
+%% Copy to wifi_creds.erl (git-ignored) and fill in your network.
+-module(wifi_creds).
+-export([get/0]).
+get() -> {"your-ssid", "your-password"}.

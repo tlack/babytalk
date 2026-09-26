@@ -8,7 +8,7 @@ defmodule ListenDemo.MixProject do
       elixir: "~> 1.17",
       erlc_paths: ["src", "../../lib/babytalk/src"],
       deps: [{:exatomvm, git: "https://github.com/atomvm/exatomvm.git", runtime: false}],
-      atomvm: [start: :listen_demo, flash_offset: 0x490000]
+      atomvm: [start: :listen_demo, flash_offset: 0xA90000]
     ]
   end
 

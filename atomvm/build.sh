@@ -68,4 +68,4 @@ python -m esptool --chip esp32s3 merge_bin -o "$OUT/atomvm-babytalk.img" \
     0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin \
     0x10000 build/atomvm-esp32.bin 0x410000 "$OUT/boot.avm"
 ls -l "$OUT/atomvm-babytalk.img" build/atomvm-esp32.bin
-echo "flash: esptool.py --chip esp32s3 write_flash 0x0 $OUT/atomvm-babytalk.img   (apps go to main.avm at 0x490000, the model to 0x590000)"
+echo "flash: esptool.py --chip esp32s3 write_flash 0x0 $OUT/atomvm-babytalk.img   (the model goes to 0x490000, apps to main.avm at 0xA90000)"

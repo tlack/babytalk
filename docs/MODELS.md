@@ -31,11 +31,16 @@ quantization (section 2 has what we plan to do about it).
 |---|---|---|---|
 | MicroPython, standard layout | 0x410000, 6 MB | yes | no |
 | MicroPython, int8 layout (`partitions-stt-int8.csv`) | 0x410000, 10 MB | yes | yes |
-| AtomVM (`atomvm/partitions-babytalk.csv`) | 0x590000, 6 MB | yes | no (would need a 10 MB partition) |
+| AtomVM (`atomvm/partitions-babytalk.csv`) | 0x490000, 6 MB | yes | with a 10 MB partition (see below) |
+
+For the int8 model on AtomVM, grow the model partition to 10 MB in
+`atomvm/partitions-babytalk.csv` (model `0x490000` size `0xA00000`, then `main.avm` at
+`0xE90000` size `0x170000`, 1.4 MB for your app) and rebuild; apps then flash to `0xE90000`.
+Not yet tried on the board.
 
 ```bash
 esptool.py --chip esp32s3 write_flash 0x410000 models/citrinet256_int4.mmrt   # MicroPython
-esptool.py --chip esp32s3 write_flash 0x590000 models/citrinet256_int4.mmrt   # AtomVM
+esptool.py --chip esp32s3 write_flash 0x490000 models/citrinet256_int4.mmrt   # AtomVM
 ```
 
 Or, from MicroPython, install a model from the SD card or the board's filesystem without a

@@ -8,7 +8,7 @@ defmodule TcpUploadRepro.MixProject do
       elixir: "~> 1.17",
       erlc_paths: ["src"],
       deps: [{:exatomvm, git: "https://github.com/atomvm/exatomvm.git", runtime: false}],
-      atomvm: [start: :tcp_upload_repro, flash_offset: 0x490000]
+      atomvm: [start: :tcp_upload_repro, flash_offset: 0xA90000]
     ]
   end
 

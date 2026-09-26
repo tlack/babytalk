@@ -16,7 +16,7 @@ Stock AtomVM only (`network`, `gen_tcp`, `io`): no NIFs, no custom components.
    esptool.py --chip esp32s3 write_flash 0x250000 tcp_upload_repro.avm   # stock release image layout
    ```
 
-   `mix.exs` has `flash_offset: 0x490000` for our own firmware layout; on a stock
+   `mix.exs` has `flash_offset: 0xA90000` for our own firmware layout; on a stock
    AtomVM release image `main.avm` is at `0x250000`.
 3. The console prints `tcp_upload_repro listening on {a,b,c,d}:5556`. From a PC on the same
    network:

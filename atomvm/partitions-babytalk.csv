@@ -1,9 +1,11 @@
 # AtomVM + BabyTalk on a 16 MB ESP32-S3 (Waveshare ESP32-S3-CAM)
 # factory 4 MB: AtomVM + NIFs + sanoTTS (its dictionary and voice are ~1.9 MB of flash)
+# main.avm is last and takes the rest of the flash, so a bigger chip (e.g. 32 MB) only grows
+# it. For the int8 model (9.8 MB): model 0x490000 size 0xA00000, main.avm 0xE90000 size 0x170000.
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x400000,
 boot.avm, data, phy,     0x410000, 0x80000,
-main.avm, data, phy,     0x490000, 0x100000,
-model,    data, 0x40,    0x590000, 0x600000,
+model,    data, 0x40,    0x490000, 0x600000,
+main.avm, data, phy,     0xA90000, 0x570000,

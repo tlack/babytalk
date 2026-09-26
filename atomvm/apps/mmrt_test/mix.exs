@@ -8,7 +8,7 @@ defmodule MmrtTest.MixProject do
       elixir: "~> 1.17",
       erlc_paths: ["src", "../../lib/mmrt/src"],
       deps: [{:exatomvm, git: "https://github.com/atomvm/exatomvm.git", runtime: false}],
-      atomvm: [start: :mmrt_test, flash_offset: 0x490000]
+      atomvm: [start: :mmrt_test, flash_offset: 0xA90000]
     ]
   end
 

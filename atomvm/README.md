@@ -139,10 +139,10 @@ Elixir 1.17+ (for the `exatomvm` mix tasks).
 ```bash
 atomvm/build.sh                     # AtomVM v0.7.0-alpha.1 + our components -> ~/build/atomvm-out/atomvm-babytalk.img
 esptool.py --chip esp32s3 write_flash 0x0 ~/build/atomvm-out/atomvm-babytalk.img \
-    0x590000 models/citrinet256_int4.mmrt          # firmware + Erlang/Elixir libs, then the model
+    0x490000 models/citrinet256_int4.mmrt          # firmware + Erlang/Elixir libs, then the model
 
 cd atomvm/apps/listen_demo && mix deps.get && mix atomvm.packbeam
-esptool.py --chip esp32s3 write_flash 0x490000 listen_demo.avm
+esptool.py --chip esp32s3 write_flash 0xA90000 listen_demo.avm
 ```
 
 `build.sh` clones the pinned AtomVM tag, applies `patches/`, links in `components/` (ours and
@@ -156,8 +156,8 @@ the official release image, so no host build of AtomVM is needed.
 |---|---|---|---|
 | factory | 0x10000 | 4 MB | AtomVM + NIFs + sanoTTS (its dictionary and voice: ~1.9 MB) |
 | boot.avm | 0x410000 | 512 KB | Erlang + Elixir libraries |
-| main.avm | 0x490000 | 1 MB | your app |
-| model | 0x590000 | 6 MB | the int4 `.mmrt` model |
+| model | 0x490000 | 6 MB | the int4 `.mmrt` model |
+| main.avm | 0xA90000 | 5.4 MB | your app: last, so it takes whatever flash is left |
 
 Apps: `apps/mmrt_test` (MMRT test vectors from `gen_vectors.py` + benchmarks),
 `apps/stt_server` + `tools/stt_client.py` (send WAVs over WiFi, get transcripts back; the

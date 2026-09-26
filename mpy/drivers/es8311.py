@@ -12,6 +12,10 @@
 # the codec needs no retuning. Proof + the derivation: BOARD_WAVESHARE_S3_CAM.md §4.
 #
 # The chip is an I2S SLAVE here: the ESP32 drives MCLK/BCLK/LRCK.
+#
+# Derived from Espressif's es8311 driver (github.com/espressif/esp-bsp, components/es8311),
+# Copyright Espressif Systems (Shanghai) CO LTD, Apache-2.0 (licenses/Apache-2.0.txt).
+# Changes: rewritten in MicroPython, clock table reduced to its MCLK = 256 x Fs row.
 
 import time
 

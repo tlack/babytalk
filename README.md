@@ -216,7 +216,8 @@ mkdir -p ~/build/sentry-fw && cd ~/build/sentry-fw
 git clone --depth 1 -b v1.27.0 https://github.com/micropython/micropython
 git -C micropython apply $REPO/mpy/patches/micropython-i2s-mck.patch
 make -C micropython/ports/esp32 submodules
-git clone --depth 1 https://github.com/Ampixa/sanoTTS ~/build/tts/sanoTTS    # optional: text to speech
+git clone https://github.com/Ampixa/sanoTTS ~/build/tts/sanoTTS             # optional: text to speech,
+git -C ~/build/tts/sanoTTS checkout 18e26b2b365bff41d211e516b0760021451438f1  # at the audited commit
 cd $REPO && mpy/build.sh
 ```
 
@@ -367,10 +368,22 @@ Thomas Lackner. Other people's work used here keeps its own license:
 - **Speech models** (`models/`): derived from NVIDIA's
   [stt_en_citrinet_256_ls](https://huggingface.co/nvidia/stt_en_citrinet_256_ls),
   CC-BY-4.0. Converted and quantized by this project; see [`models/README.md`](models/README.md).
-- **Text to speech**: [sanoTTS](https://github.com/Ampixa/sanoTTS) by Ampixa. The runtime
-  used here is MIT, and its pronunciation dictionary (from misaki) is Apache-2.0.
-  Downloaded at build time, not included here.
-- **MicroPython** (MIT) and **ESP-IDF** (Apache-2.0), downloaded at build time.
+- **Text to speech**: [sanoTTS](https://github.com/Ampixa/sanoTTS) by Ampixa, fetched at build
+  time from your own checkout (pinned commit) -- none of it is in this repository. Its runtime
+  is MIT and its dictionary (from misaki) Apache-2.0, but three of the files we compile carry
+  no licence of their own and fall under sanoTTS's GPL-3.0 default, so **firmware binaries
+  that include text to speech should be treated as GPL-3.0** until that is clarified
+  upstream. File-by-file details: [`components/sanotts/LICENSES.md`](components/sanotts/LICENSES.md).
+- **MicroPython** (MIT) and **ESP-IDF** (Apache-2.0), downloaded at build time; the
+  firmware also compiles in Espressif's **esp-dsp** (Apache-2.0, the log-mel front end's
+  FFT). The `bench/` firmware uses **esp-nn** (Apache-2.0).
+- **AtomVM** (Apache-2.0 OR LGPL-2.1-or-later): the VM and its Erlang/Elixir standard
+  libraries (`boot.avm`) are part of the AtomVM firmware image (`atomvm/`). Downloaded at
+  build time; our local patch is in `atomvm/patches/`.
+- **Audio codec drivers**: the ES7210 and ES8311 register sequences in `mpy/drivers/`,
+  `stt/main/mic.c`, `bench/main/bench_rec.c` and `atomvm/components/atomvm_babytalk/
+  board_audio.c` are derived from Espressif's esp-bsp drivers (Apache-2.0,
+  [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt)); each file says so.
 - Parts of the 1x1 convolution kernel are adapted from Espressif's ESP-DL (MIT).
 
 Project history and early design notes: `docs/historical/`.

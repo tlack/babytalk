@@ -36,8 +36,10 @@ tts.last()                       # phonemes, frames, samples, g2p_ms, synth_ms, 
 
 [sanoTTS](https://github.com/Ampixa/sanoTTS)'s `en_us_e12nano` voice (294k params, int8,
 24 kHz) with its espeak-free lexicon G2P, built from the repo's ESPHome component
-(runtime MIT, dictionary misaki us_gold Apache-2.0; `build.sh` copies it from
-`SANOTTS_DIR`, default `~/build/tts/sanoTTS`, and patches it to one scratch bank). The
+(`build.sh` copies it from `SANOTTS_DIR`, default `~/build/tts/sanoTTS`, which must be at
+the audited commit, and patches it to one scratch bank). Licensing: runtime MIT, dictionary
+Apache-2.0, but three compiled files have no licence of their own -- treat firmware binaries
+with `tts` as GPL-3.0; see `components/sanotts/LICENSES.md`. The
 firmware builds without `tts` if that checkout is missing. Measured here: **RTF 0.25-0.26**
 (4.06 s of speech in 1.05 s), all MACs on the PIE kernels, arena peak 84,208 B = the
 project's reference. `examples/say_demo.py` plays it through the ES8311 + PA.

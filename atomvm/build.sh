@@ -41,11 +41,12 @@ fi
 # buffers go to PSRAM (internal RAM is short next to AtomVM + WiFi)
 mkdir -p "$OUT"
 TTS_ARGS=()
-if "$HERE/../components/sanotts/prepare.sh" "${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}" "$OUT/sanotts_src"; then
-    TTS_ARGS=(-D SANOTTS_SRC="$OUT/sanotts_src" -D SANOTTS_BSS_PSRAM=1)
-else
-    echo "no sanoTTS checkout: building without text to speech" >&2
-fi
+rc=0; "$HERE/../components/sanotts/prepare.sh" "${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}" "$OUT/sanotts_src" || rc=$?
+case $rc in
+    0) TTS_ARGS=(-D SANOTTS_SRC="$OUT/sanotts_src" -D SANOTTS_BSS_PSRAM=1) ;;
+    1) echo "no sanoTTS checkout: building without text to speech" >&2 ;;
+    *) exit $rc ;;                                   # wrong sanoTTS commit
+esac
 idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;$HERE/sdkconfig.babytalk" "${TTS_ARGS[@]}" build
 
 # boot.avm: the Erlang + Elixir standard libraries, cut from the release image (at 0x1D0000 there)

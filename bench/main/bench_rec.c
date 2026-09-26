@@ -13,6 +13,10 @@
 //   @@R {...}                per-channel stats
 //   @@A <base64>             raw interleaved s16le PCM, 3072 bytes per line
 // Base64 because the console's newline translation makes raw binary unsafe.
+//
+// ES7210 register sequence derived from Espressif's es7210 driver (github.com/espressif/
+// esp-bsp, components/es7210), Copyright Espressif Systems (Shanghai) CO LTD, Apache-2.0
+// (licenses/Apache-2.0.txt); rewritten in C for one fixed configuration.
 #include <math.h>
 #include <string.h>
 #include "driver/i2c_master.h"

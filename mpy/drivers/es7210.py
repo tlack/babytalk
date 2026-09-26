@@ -10,6 +10,10 @@
 #
 # The chip is an I2S SLAVE; the ESP32 drives MCLK/BCLK/LRCK. The board wires two mics
 # of the four channels, so a stereo 2-slot read gives both; we mix or take one.
+#
+# Derived from Espressif's es7210 driver (github.com/espressif/esp-bsp, components/es7210),
+# Copyright Espressif Systems (Shanghai) CO LTD, Apache-2.0 (licenses/Apache-2.0.txt).
+# Changes: rewritten in MicroPython, clock table reduced to its MCLK = 256 x Fs rows.
 
 import time
 

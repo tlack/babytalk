@@ -2,6 +2,10 @@
 // Register sequence and pins ported verbatim from bench/main/bench_rec.c (itself a port
 // of Watchtower's proven es7210.py): expander P6 raises the audio rail, ES7210 over
 // I2C, I2S RX STEREO (MONO garbles this codec pair), MCLK = 256*Fs.
+//
+// ES7210 register sequence derived from Espressif's es7210 driver (github.com/espressif/
+// esp-bsp, components/es7210), Copyright Espressif Systems (Shanghai) CO LTD, Apache-2.0
+// (licenses/Apache-2.0.txt); rewritten in C for one fixed configuration.
 #include "mic.h"
 
 #include "driver/i2c_master.h"

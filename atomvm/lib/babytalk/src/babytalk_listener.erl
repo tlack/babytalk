@@ -41,7 +41,7 @@
 %% claimed and the next listener would get {error, busy} forever.
 -module(babytalk_listener).
 -behaviour(gen_server).
--export([start_link/1, start_link/2, stop/1, say/2, chime/2, ask/3, wake_on/2]).
+-export([start_link/1, start_link/2, stop/1, say/2, chime/2, ask/3, wake_on/2, sentences/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(CUES, #{ready => [{587, 90}, {0, 30}, {880, 140}],      % D5 -> A5
@@ -51,7 +51,8 @@
 -record(st, {opts,
              phase = idle,       % wake | message | idle (mic off: decoding, speaking, waiting)
              mic = none,         % none | {on, Ref} | {stopping, Ref}
-             out = [],           % queued output: {cue, Name} | {say, Text}
+             out = [],           % queued output: {cue, Name} | {tones, Notes} | {say, Piece, Said}
+                                 % (Said: the whole text, on its last piece, else none)
              out_ref = none,     % none | {say | play, Ref, Item}
              then = wake,        % the phase to enter when the queue is empty
              win = [], win_bytes = 0,              % wake: the newest window_ms, newest first
@@ -70,7 +71,9 @@ start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
 start_link(Name, Opts) -> gen_server:start_link({local, Name}, ?MODULE, Opts, []).
 stop(Server) -> gen_server:stop(Server).
 
-%% Speak Text (iodata) through the speaker; listening pauses meanwhile.
+%% Speak Text (iodata) through the speaker; listening pauses meanwhile. Long text is said a
+%% sentence or so at a time (sentences/1): synthesis takes about as long as the speech, so a
+%% long answer said whole would be silent (and deaf) for that long first.
 say(Server, Text) -> gen_server:cast(Server, {say, iolist_to_binary(Text)}).
 
 %% Play a chime ([{Hz, Ms}], as babytalk:tones/2) at the cue volume, in turn with speech;
@@ -101,18 +104,18 @@ handle_call(_Req, _From, St) -> {reply, {error, unknown_call}, St}.
 
 %% a reply to a command: speak it, then the ready chime
 handle_cast({say, Text}, #st{awaiting_reply = true} = St) ->
-    {noreply, output([{say, Text}, cue(ready)], wake, St#st{awaiting_reply = false})};
+    {noreply, output(says(Text) ++ [cue(ready)], wake, St#st{awaiting_reply = false})};
 handle_cast({say, Text}, #st{phase = idle} = St) ->
-    {noreply, output([{say, Text}], St#st.then, St)};
+    {noreply, output(says(Text), St#st.then, St)};
 handle_cast({say, Text}, #st{phase = Phase} = St) ->
-    {noreply, output([{say, Text}], Phase, St)};
+    {noreply, output(says(Text), Phase, St)};
 handle_cast({chime, Notes}, #st{phase = idle} = St) ->
     {noreply, output([{tones, Notes}], St#st.then, St)};
 handle_cast({chime, Notes}, #st{phase = Phase} = St) ->
     {noreply, output([{tones, Notes}], Phase, St)};
 handle_cast({ask, Prompt, Opts}, St) ->
     Then = {message, answer, maps:get(ms, Opts, none)},
-    {noreply, output([{say, Prompt}, cue(wake)], Then, St#st{awaiting_reply = false})};
+    {noreply, output(says(Prompt) ++ [cue(wake)], Then, St#st{awaiting_reply = false})};
 handle_cast({wake_on, Spellings}, St) ->
     {noreply, output([cue(ready)], wake, St#st{phrase = Spellings, awaiting_reply = false})};
 handle_cast(_Msg, St) -> {noreply, St}.
@@ -142,18 +145,19 @@ handle_info({babytalk, Ref, Result}, #st{decoding = Ref, msg_kind = Kind} = St) 
 handle_info(retry_decode, #st{decoding = {pending, Pcm}} = St) ->
     {noreply, start_decoding(Pcm, St)};
 %% ---- output
-handle_info({babytalk, Ref, Result}, #st{out_ref = {say, Ref, {say, Text}}} = St) ->
+handle_info({babytalk, Ref, Result}, #st{out_ref = {say, Ref, {say, _, _} = Item}} = St) ->
     case Result of
         {ok, Pcm, Info} ->
             {ok, P} = babytalk:play(Pcm, proplists:get_value(rate, Info), maps:get(voice_volume, St#st.opts)),
-            {noreply, St#st{out_ref = {play, P, {say, Text}}}};
+            {noreply, St#st{out_ref = {play, P, Item}}};
         {error, E} ->
             notify(St, {say_error, E}),
             {noreply, pump(St#st{out_ref = none})}
     end;
 handle_info({babytalk_play, Ref, Result}, #st{out_ref = {play, Ref, Item}} = St) ->
     case {Item, Result} of
-        {{say, Text}, done} -> notify(St, {said, Text});
+        {{say, _, none}, done} -> ok;                      % more of it to come
+        {{say, _, Text}, done} -> notify(St, {said, Text});
         {_, done} -> ok;
         {_, E} -> notify(St, {play_error, E})
     end,
@@ -172,6 +176,29 @@ terminate(_Reason, _St) ->
 %% ---------------------------------------------------------------------------- output queue
 
 cue(Name) -> {cue, Name}.
+
+says(Text) ->
+    case sentences(Text) of
+        [] -> [];
+        Ps -> [{say, P, none} || P <- lists:droplast(Ps)] ++ [{say, lists:last(Ps), Text}]
+    end.
+
+%% Text in pieces of at most ?PIECE bytes, cut after a sentence's end once a piece has some
+%% length (short sentences travel together), else at a space
+-define(PIECE, 160).
+sentences(Text) ->
+    pack(binary:split(Text, [<<" ">>, <<"\n">>], [global, trim_all]), <<>>, []).
+
+pack([], <<>>, Acc) -> lists:reverse(Acc);
+pack([], Cur, Acc) -> lists:reverse([Cur | Acc]);
+pack([W | Ws], Cur, Acc) ->
+    Next = case Cur of <<>> -> W; _ -> <<Cur/binary, " ", W/binary>> end,
+    End = binary:last(W),
+    if
+        byte_size(Next) > ?PIECE, Cur =/= <<>> -> pack([W | Ws], <<>>, [Cur | Acc]);   % full: cut before W
+        (End =:= $. orelse End =:= $? orelse End =:= $!), byte_size(Next) >= 60 -> pack(Ws, <<>>, [Next | Acc]);
+        true -> pack(Ws, Next, Acc)
+    end.
 
 %% Queue Items, then enter phase Then; the mic pauses while anything plays.
 output(Items, Then, #st{opts = #{cues := false}} = St) ->
@@ -195,7 +222,7 @@ pump(#st{out = [Item | Rest], opts = Opts} = St) ->
     Started = case Item of
                   {cue, Name} -> {play, babytalk:tones(maps:get(Name, ?CUES), maps:get(cue_volume, Opts))};
                   {tones, Notes} -> {play, babytalk:tones(Notes, maps:get(cue_volume, Opts))};
-                  {say, Text} -> {say, babytalk:say(Text, #{length_scale => maps:get(length_scale, Opts)})}
+                  {say, Text, _} -> {say, babytalk:say(Text, #{length_scale => maps:get(length_scale, Opts)})}
               end,
     case Started of
         {Kind, {ok, Ref}} -> St#st{out = Rest, out_ref = {Kind, Ref, Item}};
@@ -269,7 +296,7 @@ scored({ok, Text, Info}, #st{phase = wake, opts = #{threshold := Thr}} = St) ->
     case is_float(Score) andalso Score >= Thr of
         true ->
             notify(St, {wake, Text, Score}),
-            Greeting = case maps:get(greeting, St#st.opts) of none -> []; G -> [{say, iolist_to_binary(G)}] end,
+            Greeting = case maps:get(greeting, St#st.opts) of none -> []; G -> says(iolist_to_binary(G)) end,
             output([cue(wake) | Greeting], {message, command, none}, St);
         false -> St
     end;

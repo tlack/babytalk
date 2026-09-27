@@ -59,8 +59,9 @@ these differences:
    On the P4 only speech synthesis uses the pool, and it runs as fast from PSRAM. The internal
    RAM goes to the recognizer's activations instead. Also set `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`
    (sanoTTS's static buffers) and `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`.
-5. Leave out `atomvm_mmrt` or keep it: its NIFs are S3-only (`AVM_ENABLE_MMRT_NIFS` depends on
-   the S3), so on a P4 it compiles to nothing.
+5. `atomvm_mmrt` (the `mmrt` module: matvec, matmul... over binaries) works on the P4 too, on
+   its vector unit: 256x256 int8 matvec 243 MMAC/s, matmul with 16 rows 1070 MMAC/s (the S3:
+   145 and 720). `apps/mmrt_test` passes all 26 test vectors.
 6. The P4's bootloader goes at **0x2000** (the S3's at 0x0). With 32 MB of flash, use the S3
    layout or a bigger one; the model partition is found by name (`model`).
 
@@ -103,7 +104,8 @@ S3's (`ee.`), but not exactly. Each of these cost a debugging round:
   a few percent.
 - **`esp.movi.32.q` isn't accepted by the assembler** in any operand order. Load constants
   from memory instead.
-- **Only some registers** work as vector-instruction operands: `t0`-`t2` are rejected.
+- **Only some registers** work as vector-instruction operands: `t0`-`t2` and `a6`/`a7` are
+  rejected (x8-x15 and x28-x31 have worked). Assemble a probe before designing around one.
 - **The vector unit can't read the P4's low-power RTC RAM**, which ESP-IDF adds to the
   internal heap (a load access fault). Ask for `MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA`, which
   leaves it out.

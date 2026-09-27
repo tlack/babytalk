@@ -171,15 +171,22 @@ typedef struct {
 } __attribute__((aligned(16))) mmrt_p4_dw_t;
 void mmrt_p4_dw_row(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_p4_dw_t *a);
 
+// the rounding term 2^(shift - 1) as a product of two int8s, rnd_a[i] * rnd_b[0] (shift 1..13)
+static void rnd_factors(int8_t rnd_a[16], int8_t rnd_b[16], int shift)
+{
+    memset(rnd_a, 0, 16);
+    memset(rnd_b, 0, 16);
+    if (shift <= 0) return;
+    const int r = 1 << (shift - 1), A = r < 64 ? r : 64;
+    memset(rnd_a, A, 16);
+    rnd_b[0] = (int8_t)(r / A);
+}
+
 static void dw_p4(const int8_t *x, int T_in, int C, const int8_t *w, int K, int stride, int pad, int shift,
                   int relu, int8_t *y, int T_out)
 {
     mmrt_p4_dw_t a = {0, C, C / 16, K * 16, shift, relu, {0, 0}, {0}, {0}};
-    if (shift > 0) {                                     // 2^(shift - 1) as a product of two int8s
-        const int r = 1 << (shift - 1), A = r < 64 ? r : 64;
-        memset(a.rnd_a, A, sizeof(a.rnd_a));
-        a.rnd_b[0] = (int8_t)(r / A);
-    }
+    rnd_factors(a.rnd_a, a.rnd_b, shift);
     for (int t = 0; t < T_out; t++) {
         const int start = t * stride - pad;              // input frame of tap 0
         const int k0 = start < 0 ? -start : 0, k1 = start + K > T_in ? T_in - start : K;
@@ -246,5 +253,51 @@ int mmrt_dwconv_p4(const int8_t *x, int T_in, int C, const int8_t *w, int K, int
         return -1;
     dw_p4(x, T_in, C, w, K, stride, pad, shift, relu, y, T_out);
     return 0;
+}
+#endif
+
+#ifdef MMRT_P4
+// ---- one 16-output group of a 1x1 conv / matmul on the P4's vector unit, from the packed
+// [C][16] layout (mmrt_p4_c1_group), checked once against exact integer arithmetic
+
+typedef struct {
+    int T, C, y_stride, shift, relu, pad_[3];
+    int8_t rnd_a[16], rnd_b[16];
+} __attribute__((aligned(16))) mmrt_p4_c1_t;
+void mmrt_p4_c1_group(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_p4_c1_t *a);
+
+void mmrt_p4_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride)
+{
+    mmrt_p4_c1_t a = {T, C, y_stride, shift, relu, {0, 0, 0}, {0}, {0}};
+    rnd_factors(a.rnd_a, a.rnd_b, shift);
+    mmrt_p4_c1_group(y, x, w, &a);
+}
+
+static int s_c1_ok = -1;
+
+int mmrt_p4_matmul_ok(void)
+{
+    if (s_c1_ok >= 0) return s_c1_ok;
+    enum { T = 5, C = 64 };
+    static int8_t x[T * C] __attribute__((aligned(16))), w[C * 16] __attribute__((aligned(16))),
+        y[T * 32] __attribute__((aligned(16)));
+    uint32_t r = 4242;
+    for (int trial = 0; trial < 28; trial++) {
+        const int range = trial < 14 ? 16 : 60, shift = trial % 14, relu = trial & 1;  // |acc| < 64*60*60 < 2^19
+        for (int i = 0; i < T * C; i++) x[i] = (int8_t)((int)((r = r * 1103515245 + 12345) >> 16) % range);
+        for (int i = 0; i < C * 16; i++) w[i] = (int8_t)((int)((r = r * 1103515245 + 12345) >> 16) % range);
+        mmrt_p4_matmul_group(x, T, C, w, shift, relu, y, 32);
+        for (int t = 0; t < T; t++)
+            for (int i = 0; i < 16; i++) {
+                int32_t acc = 0;
+                for (int c = 0; c < C; c++) acc += x[t * C + c] * w[c * 16 + i];
+                const int8_t want = out8(acc, shift, relu);
+                if (y[t * 32 + i] != want) {
+                    printf("mmrt: the P4 matmul kernel differs (shift %d: %d, not %d): not used\n", shift, y[t * 32 + i], want);
+                    return s_c1_ok = 0;
+                }
+            }
+    }
+    return s_c1_ok = 1;
 }
 #endif

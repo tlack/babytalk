@@ -36,6 +36,12 @@ int mmrt_dwconv_p4(const int8_t *x, int T_in, int C, const int8_t *w, int K, int
                    int relu, int8_t *y, int T_out);
 // 1 if the vector dot product matches C's on a range of lengths (checked once, before use)
 int mmrt_dot_p4_check(void);
+// One 16-output group over T frames from the packed [C][16] layout, rounded and saturated as
+// the reference (x, w, y 16-byte aligned; C a multiple of 16; 0 <= shift <= 13; |x . w| < 2^19:
+// the lanes are 20 bits). Use only when mmrt_p4_matmul_ok() (checked once against exact
+// integer arithmetic).
+void mmrt_p4_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride);
+int mmrt_p4_matmul_ok(void);
 #endif
 
 #ifdef __cplusplus

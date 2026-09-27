@@ -95,7 +95,7 @@ features, decoding, wake phrases) is `components/stt_engine/`, and the ESP-IDF c
 | `mmrt_s3.S` | PIE kernels: 1x1 conv, depthwise conv, fused block tail, column sums, CB4 decode |
 | `mmrt_s3.c/.h` | drivers: weight staging, two-core split, streaming, fusion, buffers |
 | `mmrt_port.c/.h` | portable kernels for other chips, bit-exact with the reference; on the P4 also the drivers for its vector kernels (two-core split, self-checks) |
-| `mmrt_p4.S` | the ESP32-P4's vector kernels: int8 dot product, depthwise conv |
+| `mmrt_p4.S` | the ESP32-P4's vector kernels: int8 dot product, depthwise conv, one 1x1 group from the packed layout (the `mmrt` NIFs' matmul) |
 
 ## Results (Waveshare ESP32-S3-CAM, ESP-IDF app, milliseconds of model time)
 

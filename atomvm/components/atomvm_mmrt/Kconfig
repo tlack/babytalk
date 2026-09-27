@@ -1,7 +1,7 @@
 config AVM_ENABLE_MMRT_NIFS
     bool "Enable MMRT (int8/int4 vector kernel) NIFs"
     default y
-    depends on IDF_TARGET_ESP32S3
+    depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
     help
-        The mmrt module's kernels are the ESP32-S3's PIE ones; on other chips (the ESP32-P4)
-        BabyTalk's speech runs on MMRT's reference kernels, but these NIFs aren't offered.
+        matvec/matmul on the chip's vector unit: the ESP32-S3's PIE, or the ESP32-P4's (row
+        dot products), with an exact C path for anything they can't take.

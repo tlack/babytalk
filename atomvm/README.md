@@ -1,8 +1,8 @@
 # BabyTalk and MMRT for AtomVM (Erlang / Elixir on the ESP32-S3 and ESP32-P4)
 
 On-device speech to text, text to speech, a wake phrase, microphone and speaker, plus the
-int8/int4 vector kernels underneath, for [AtomVM](https://github.com/atomvm/AtomVM) **v0.7.0-alpha.1** on the ESP32-S3,
-and BabyTalk (not the `mmrt` module) on the ESP32-P4 as well.
+int8/int4 vector kernels underneath, for [AtomVM](https://github.com/atomvm/AtomVM) **v0.7.0-alpha.1** on the ESP32-S3
+and the ESP32-P4.
 Everything runs on the board: no cloud, no network needed (WiFi is only for the test tools).
 
 ```erlang
@@ -22,7 +22,7 @@ Two libraries, usable separately:
 
 | | What | Module | Needs |
 |---|---|---|---|
-| **MMRT** | int8/int4 matvec, matmul, dot, requant, top-k... on the S3's SIMD unit | `mmrt` / `MMRT` | an ESP32-S3 (the NIFs are S3-only) |
+| **MMRT** | int8/int4 matvec, matmul, dot, requant, top-k... on the chip's SIMD unit | `mmrt` / `MMRT` | an ESP32-S3 or ESP32-P4 |
 | **BabyTalk** | speech to text, text to speech, wake phrase, mic + speaker | `babytalk`, `babytalk_listener` / `BabyTalk` | the model partition; our audio drivers (below) |
 
 Status: all of it works on the Waveshare ESP32-S3-CAM -- say "wake up tomato face", wait for
@@ -123,7 +123,8 @@ of 16; the Bin is an ordinary binary you can keep, send, or build on the host).
 | `to_int4/1`, `from_int4/1` | conversions |
 
 matvec/matmul use the SIMD unit when the accumulators provably fit its 20-bit lanes
-(MaxRowL1 x max|x| < 2^19) and an exact C path otherwise: same results either way. Each call
+(MaxRowL1 x max|x| < 2^19; on the P4 also Shift <= 13) and an exact path otherwise (on the P4,
+row dot products on its vector unit): same results either way. Each call
 runs on the calling scheduler and is capped at 4M multiply-adds (`error(too_big)` above that).
 
 ### `babytalk` (Erlang) / `BabyTalk` (Elixir)
@@ -205,7 +206,9 @@ talk to it; the phrase is stored as the model's own spelling of how you said it)
 - **Internal RAM**: 116 KB free at start (after the engines' 84.5 KB shared pool is
   reserved), 42 KB after WiFi joins, ~31 KB during inference.
 
-On the **ESP32-P4** (Waveshare ESP32-P4-WIFI6, 360 MHz): 2 s of speech transcribed in 0.87 s,
+On the **ESP32-P4** (Waveshare ESP32-P4-WIFI6, 360 MHz): **MMRT**: 256x256 int8 matvec 270 us
+(243 MMAC/s), matmul with 16 rows 1070 MMAC/s, int4 390 MMAC/s (its decoding is plain C there),
+26/26 test vectors; **speech**: 2 s transcribed in 0.87 s,
 8 s in 3.6 s; speech synthesis 0.71x real time (sanoTTS's scalar kernels); 295 KB of internal
 RAM free at boot, ~227 KB online. Details:
 [../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md).

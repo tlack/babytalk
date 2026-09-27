@@ -9,8 +9,10 @@
 //   {cb4_m16,  Rows, Cols, MaxRowL1, Bin}   MMRT's 1x1-conv weight layouts (mmrt/mmrt.h), padded
 //                                           to multiples of 16; MaxRowL1 = max_r sum_c |W[r][c]|
 //
-// matvec/matmul run on the PIE unit when the accumulators provably fit its 20-bit lanes
-// (MaxRowL1 * max|x| < 2^19), else on an exact C path: results are the same either way.
+// matvec/matmul run on a vector unit when there is one: on the ESP32-S3's PIE when the
+// accumulators provably fit its 20-bit lanes (MaxRowL1 * max|x| < 2^19), on the ESP32-P4's as
+// row dot products into a 40-bit accumulator (always), else on an exact C path: results are
+// the same either way.
 // NIF arguments are not GC roots unless passed as such: every NIF reads its inputs
 // before it allocates result terms (top_k re-fetches after a rooted GC).
 // Everything runs on the calling scheduler (no dirty NIFs in AtomVM), so each call is
@@ -34,10 +36,15 @@
 #include <esp_heap_caps.h>
 
 #include "mmrt.h"
+#ifdef MMRT_S3
 #include "mmrt_s3.h"
 
 // in mmrt_s3.S: one CB4 group's index rows -> int8 (dst, idx 4-byte aligned)
 void mmrt_s3_cb4_rows(int8_t *dst, const uint8_t *idx, const uint32_t *tab32, int C);
+#endif
+#ifdef MMRT_P4
+#include "mmrt_port.h"  // mmrt_dot_s8: the P4's vector dot product (mmrt_p4.S)
+#endif
 
 #define MMRT_SYNC_MAX_MACS (4 * 1024 * 1024)  // ~2 ms on PIE, ~30 ms on the C path
 #define MAX_DIM 65535
@@ -155,10 +162,16 @@ static bool get_mat(Context *ctx, term t, mat_t *m)
 }
 
 // 16-aligned scratch: internal RAM when it is small enough and available, else PSRAM.
+// (on the P4, DMA-capable internal RAM: that leaves out its RTC RAM, which the vector unit can't read)
+#ifdef MMRT_P4
+#define FAST_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)
+#else
+#define FAST_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#endif
 static void *scratch(size_t bytes, bool prefer_internal)
 {
     void *p = NULL;
-    if (prefer_internal && bytes <= 32 * 1024) p = heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (prefer_internal && bytes <= 32 * 1024) p = heap_caps_aligned_alloc(16, bytes, FAST_CAPS);
     if (!p) p = heap_caps_aligned_alloc(16, bytes ? bytes : 16, MALLOC_CAP_DEFAULT);
     return p;
 }
@@ -173,12 +186,16 @@ static void load_group(const mat_t *m, int g, int8_t *dst, uint32_t *tab32)
         return;
     }
     const uint8_t *idx = src + 256;
+#ifdef MMRT_S3
     if (((uintptr_t) idx & 3) == 0) {
         for (int i = 0; i < 256; i++) tab32[i] = (uint32_t) src[i] << (8 * ((i >> 4) & 3));
         mmrt_s3_cb4_rows(dst, idx, tab32, m->cpad);
         return;
     }
-    for (int c = 0; c < m->cpad; c++, idx += 8, dst += 16) {  // unaligned source: portable decode
+#else
+    (void) tab32;
+#endif
+    for (int c = 0; c < m->cpad; c++, idx += 8, dst += 16) {  // portable decode (any alignment)
         for (int j = 0; j < 8; j++) {
             dst[2 * j] = (int8_t) src[(2 * j) * 16 + (idx[j] & 15)];
             dst[2 * j + 1] = (int8_t) src[(2 * j + 1) * 16 + (idx[j] >> 4)];
@@ -291,7 +308,21 @@ static term do_matmul(Context *ctx, term mt, term xt, bool to_int32, avm_int_t s
         if (a < 0) a = -a;
         if (a > maxabs) maxabs = a;
     }
+#if defined(MMRT_S3)
     const bool pie = !to_int32 && shift >= 0 && shift <= 20 && (int64_t) m.maxl1 * maxabs < QACC_LIMIT;
+#elif defined(MMRT_P4)  // its kernel's rounding covers shifts up to 13
+    const bool pie = !to_int32 && shift >= 0 && shift <= 13 && (int64_t) m.maxl1 * maxabs < QACC_LIMIT
+                     && mmrt_p4_matmul_ok();
+#else
+    const bool pie = false;
+    (void) maxabs;
+#endif
+#ifdef MMRT_P4
+    // the P4: each group's 16 rows repacked contiguous, each output one dot product (exact, any size)
+    static int dot_ok = -1;
+    if (dot_ok < 0) dot_ok = mmrt_dot_p4_check();
+    int8_t *rows = dot_ok && !pie ? scratch((size_t) m.cpad * 16, true) : NULL;  // (int32 results, big accumulators)
+#endif
 
     const size_t xb = (size_t) T * m.cpad, wb = (size_t) m.cpad * 16;
     const size_t yb = to_int32 ? (size_t) m.rows * 4 : (size_t) T * (pie ? m.npad : m.rows);
@@ -302,6 +333,9 @@ static term do_matmul(Context *ctx, term mt, term xt, bool to_int32, avm_int_t s
         heap_caps_free(ws);
         heap_caps_free(ys);
         free(tab);
+#ifdef MMRT_P4
+        heap_caps_free(rows);
+#endif
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
     memset(xs, 0, xb);  // padded columns multiply as zero
@@ -310,13 +344,27 @@ static term do_matmul(Context *ctx, term mt, term xt, bool to_int32, avm_int_t s
     for (int g = 0; g < m.npad / 16; g++) {
         load_group(&m, g, ws, tab);
         if (pie) {
+#if defined(MMRT_S3)
             mmrt_s3_matmul_group(xs, T, m.cpad, ws, (int) shift, 0, ys + g * 16, m.npad);
+#elif defined(MMRT_P4)
+            mmrt_p4_matmul_group(xs, T, m.cpad, ws, (int) shift, 0, ys + g * 16, m.npad);
+#endif
             continue;
         }
         const int lanes = m.rows - g * 16 < 16 ? m.rows - g * 16 : 16;
+#ifdef MMRT_P4
+        if (rows)
+            for (int c = 0; c < m.cpad; c++)
+                for (int i = 0; i < 16; i++) rows[(size_t) i * m.cpad + c] = ws[c * 16 + i];
+#endif
         for (int t = 0; t < T; t++) {
             const int8_t *xr = xs + (size_t) t * m.cpad;
             int32_t acc[16] = {0};  // |acc| <= 65535 * 128 * 128 < 2^31
+#ifdef MMRT_P4
+            if (rows) {
+                for (int i = 0; i < lanes; i++) acc[i] = mmrt_dot_s8(xr, rows + (size_t) i * m.cpad, m.cpad / 16);
+            } else
+#endif
             for (int c = 0; c < m.cols; c++) {
                 const int32_t xv = xr[c];
                 const int8_t *wc = ws + c * 16;
@@ -335,6 +383,9 @@ static term do_matmul(Context *ctx, term mt, term xt, bool to_int32, avm_int_t s
     heap_caps_free(xs);
     heap_caps_free(ws);
     free(tab);
+#ifdef MMRT_P4
+    heap_caps_free(rows);
+#endif
     term r = make_vec(ctx, to_int32 ? A_INT32 : A_INT8, ys, to_int32 ? yb : (size_t) T * m.rows);
     heap_caps_free(ys);
     if (term_is_invalid_term(r)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);

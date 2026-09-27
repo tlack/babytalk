@@ -86,3 +86,84 @@ mmrt_p4_dw_row:
     bnez    a6, .Ldw_group
     ret
     .size   mmrt_p4_dw_row, . - mmrt_p4_dw_row
+
+// void mmrt_p4_c1_group(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_p4_c1_t *a)
+//
+// One 16-output group of a 1x1 conv / matmul over T frames, straight from MMRT's packed layout
+// (the S3's mmrt_s3_conv1x1_row, one group): per frame, 16 inputs at a time, each one's 16
+// weights times it in one esp.vsmulas.s8.qacc (vector x one lane of q0) -- no repacking.
+//   x: T rows of C int8, 16-byte aligned, C a multiple of 16
+//   w: [C][16] int8, 16-byte aligned
+//   y: T rows of 16, y_stride bytes apart, 16-byte aligned
+//   a: T, C, y_stride, shift (0..13), relu, then at +32 and +48 the rounding term's factors
+//      (as mmrt_p4_dw_row)
+// The accumulator lanes are 20 bits: the caller makes sure |x . w| < 2^19.
+    .text
+    .align  4
+    .global mmrt_p4_c1_group
+    .type   mmrt_p4_c1_group, @function
+mmrt_p4_c1_group:
+    lw      a4, 0(a3)               // T
+    lw      a5, 4(a3)               // C
+    lw      a6, 8(a3)               // y_stride
+    lw      t4, 12(a3)              // shift (the PIE operands take only some registers: a7 isn't one)
+    lw      t1, 16(a3)              // relu
+    addi    t6, a3, 32
+    esp.vld.128.ip  q5, t6, 16      // rnd_a
+    esp.vld.128.ip  q4, t6, 16      // rnd_b (lane 0)
+    esp.zero.q      q6
+    srli    t3, a5, 4               // 16-input chunks per frame
+    addi    a6, a6, -16             // (the store advances y by 16 itself)
+.Lc1_frame:
+    mv      t5, a2                  // w, from the start for every frame
+    esp.zero.qacc
+    mv      t0, t3
+.Lc1_chunk:
+    esp.vld.128.ip      q0, a1, 16      // x[c .. c + 16)
+    esp.vld.128.ip      q1, t5, 16      // w[c + 0]
+    esp.vsmulas.s8.qacc q1, q0, 0       // QACC[i] += x[c + 0] * w[c + 0][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 1]
+    esp.vsmulas.s8.qacc q1, q0, 1       // QACC[i] += x[c + 1] * w[c + 1][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 2]
+    esp.vsmulas.s8.qacc q1, q0, 2       // QACC[i] += x[c + 2] * w[c + 2][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 3]
+    esp.vsmulas.s8.qacc q1, q0, 3       // QACC[i] += x[c + 3] * w[c + 3][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 4]
+    esp.vsmulas.s8.qacc q1, q0, 4       // QACC[i] += x[c + 4] * w[c + 4][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 5]
+    esp.vsmulas.s8.qacc q1, q0, 5       // QACC[i] += x[c + 5] * w[c + 5][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 6]
+    esp.vsmulas.s8.qacc q1, q0, 6       // QACC[i] += x[c + 6] * w[c + 6][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 7]
+    esp.vsmulas.s8.qacc q1, q0, 7       // QACC[i] += x[c + 7] * w[c + 7][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 8]
+    esp.vsmulas.s8.qacc q1, q0, 8       // QACC[i] += x[c + 8] * w[c + 8][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 9]
+    esp.vsmulas.s8.qacc q1, q0, 9       // QACC[i] += x[c + 9] * w[c + 9][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 10]
+    esp.vsmulas.s8.qacc q1, q0, 10       // QACC[i] += x[c + 10] * w[c + 10][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 11]
+    esp.vsmulas.s8.qacc q1, q0, 11       // QACC[i] += x[c + 11] * w[c + 11][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 12]
+    esp.vsmulas.s8.qacc q1, q0, 12       // QACC[i] += x[c + 12] * w[c + 12][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 13]
+    esp.vsmulas.s8.qacc q1, q0, 13       // QACC[i] += x[c + 13] * w[c + 13][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 14]
+    esp.vsmulas.s8.qacc q1, q0, 14       // QACC[i] += x[c + 14] * w[c + 14][i]
+    esp.vld.128.ip      q1, t5, 16      // w[c + 15]
+    esp.vsmulas.s8.qacc q1, q0, 15       // QACC[i] += x[c + 15] * w[c + 15][i]
+    addi    t0, t0, -1
+    bnez    t0, .Lc1_chunk
+    beqz    t4, .Lc1_shifted
+    esp.vsmulas.s8.qacc q5, q4, 0   // + 2^(shift - 1)
+.Lc1_shifted:
+    esp.srcmb.s8.qacc q3, t4, 1     // sat8(QACC >> shift)
+    beqz    t1, .Lc1_store
+    esp.vmax.s8     q3, q3, q6
+.Lc1_store:
+    esp.vst.128.ip  q3, a0, 16
+    add     a0, a0, a6              // next output row
+    addi    a4, a4, -1
+    bnez    a4, .Lc1_frame
+    ret
+    .size   mmrt_p4_c1_group, . - mmrt_p4_c1_group

@@ -67,18 +67,29 @@ these differences:
 
 ## 4. How fast (AtomVM, int4 model)
 
+Measured with `apps/speed_bench`, PSRAM at **200 MHz** (see below):
+
 | task | ESP32-P4 | ESP32-S3 (for comparison) |
 |---|---|---|
-| transcribe 1 s | 0.44 s | 0.35 s |
-| transcribe 2 s | **0.58 s** (the first run after a boot: 0.98 s) | 0.53 s |
-| transcribe 4 s | 1.02 s | ~0.85 s |
-| transcribe 8 s | 2.6 s | |
-| speak 5.4 s of speech | 3.8 s (0.71 x real time) | 0.27 x real time |
+| transcribe 1 s | 0.20 s | 0.35 s |
+| transcribe 2 s | **0.30 s** (the first run after a boot: 0.65 s) | 0.53 s |
+| transcribe 4 s | 0.54 s | ~0.85 s |
+| transcribe 10 s | 1.35 s | 1.72 s |
+| speak 5.4 s of speech | **1.24 s (0.23 x real time)** | 0.27 x real time |
+
+**Set the PSRAM to 200 MHz.** ESP-IDF 5.5 defaults the P4's PSRAM to 20 MHz, and files 200 MHz
+under experimental features: `CONFIG_IDF_EXPERIMENTAL_FEATURES=y` and `CONFIG_SPIRAM_SPEED_200M=y`.
+At 20 MHz the same firmware took 0.58 s for 2 s of speech; the model's weights and activations
+live in PSRAM.
 
 - Transcription on the P4 uses both cores and its vector unit (`mmrt/README.md`, "Other chips:
   the ESP32-P4"). The first transcription after a boot also decodes the int4 weights (9.8 MB,
   kept in PSRAM for later runs).
-- Speech synthesis runs on sanoTTS's portable scalar kernels: its vector kernels are S3-only.
+- Speech synthesis: BabyTalk's own P4 int8 kernels for sanoTTS (`components/sanotts/
+  snt_kernels_esp32p4.c`, `snt_matvec_esp32p4.S`) in place of its scalar ones: 0.73x -> 0.23x
+  real time, the audio bit-identical. The synthesis `Info` says how much ran on the vector
+  unit (`simd_pct`: 100 here). What's left is mostly float work (the spectrum and the inverse
+  FFT) and sanoTTS's int16 x int8 kernels, scalar on every chip.
 - Memory: 295 KB of internal RAM free at boot, ~227 KB with WiFi and TLS up. PSRAM: 24 MB free
   once the model's rows are unpacked.
 

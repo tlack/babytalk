@@ -188,11 +188,12 @@ Citrinet-256's 165 1x1 layers take it) is bit-exact on the whole model.
 | + frames in tiles of 32 | 0.87 s | 3.6 s |
 | + 1x1 on the 16-lane group kernel, bias as a chunk | 0.65 s | 2.8 s |
 | + int4 decoded on the vector unit (the first run: 1.2 s -> 1.06 s) | 0.65 s | 2.7 s |
-| + the S3's fused load-and-multiply loop | **0.58 s** | **2.6 s** |
+| + the S3's fused load-and-multiply loop | 0.58 s | 2.6 s |
+| PSRAM at 200 MHz, not ESP-IDF's default 20 (every step above was measured at 20) | 0.37 s | 1.37 s |
+| + block tails fused on the vector unit (`mmrt_p4_tail_row`) | **0.30 s** | **1.10 s** |
 
-The S3 does 2 s in 0.53 s. What's still scalar on the P4: the block tails (scale, residual
-add, ReLU: ~70 ms of a 2 s clip), which the S3 fuses into one vector pass, and the depthwise ->
-1x1 fusion the S3 uses on short clips.
+The S3 does 2 s in 0.53 s. Not yet on the P4: the depthwise -> 1x1 fusion the S3 uses on short
+clips.
 
 **The `mmrt` NIFs on the P4** (256x256, the same kernels): int8 matvec 267 MMAC/s, matmul with
 16 rows 1640 MMAC/s, int4 564 MMAC/s. The S3: 145, 720 and 466. The P4's own quirks (saturation, its zero-overhead

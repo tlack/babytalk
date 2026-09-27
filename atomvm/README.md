@@ -207,8 +207,7 @@ talk to it; the phrase is stored as the model's own spelling of how you said it)
   reserved), 42 KB after WiFi joins, ~31 KB during inference.
 
 On the **ESP32-P4** (Waveshare ESP32-P4-WIFI6, 360 MHz): **MMRT**: 256x256 int8 matvec 246 us
-(267 MMAC/s), matmul with 16 rows 1640 MMAC/s, int4 564 MMAC/s, 26/26 test vectors; **speech**:
-2 s transcribed in 0.58 s, 8 s in 2.6 s; speech synthesis 0.71x real time (sanoTTS's scalar kernels); 295 KB of internal
+(267 MMAC/s), matmul with 16 rows 1640 MMAC/s, int4 564 MMAC/s, 26/26 test vectors; **speech** (PSRAM at 200 MHz): 2 s transcribed in 0.30 s, 10 s in 1.35 s; speech synthesis 0.23x real time (BabyTalk's P4 kernels for sanoTTS); 295 KB of internal
 RAM free at boot, ~227 KB online. Details:
 [../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md).
 

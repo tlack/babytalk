@@ -56,7 +56,8 @@ expert adapters for the speech model. They aren't used yet.)
   **Waveshare ESP32-S3-CAM** (ES7210 mic, ES8311 speaker codec), and the examples use its
   pins and drivers. On another board, give `stt` 16 kHz PCM from whatever mic you have.
 - Or, from AtomVM only: an **ESP32-P4**. The **Waveshare ESP32-P4-WIFI6** (ES8311 mic and
-  speaker codec) is supported; transcription runs at about 1.1x the S3's time
+  speaker codec) is supported, and faster than the S3: 2 s of speech transcribed in 0.30 s,
+  speech synthesized at 0.23x real time
   ([docs/BOARD_WAVESHARE_P4_WIFI6.md](docs/BOARD_WAVESHARE_P4_WIFI6.md)).
 - To build: Linux or WSL, [ESP-IDF v5.5.1](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/),
   and [uv](https://docs.astral.sh/uv/) for the Python tools.

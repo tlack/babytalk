@@ -24,3 +24,7 @@ grep -q 'g_scr\[1\]' "$2/snt_nano.c"
 # speaking pace as a runtime setting (tts_set_length_scale) instead of the constant 1.0
 sed -i 's|^#define LENGTH_SCALE 1.0f .*|float snt_length_scale = 1.0f;  /* BabyTalk: runtime pace */\n#define LENGTH_SCALE snt_length_scale|' "$2/snt_nano.c"
 grep -q '^float snt_length_scale' "$2/snt_nano.c"
+# on the ESP32-P4 BabyTalk's own int8 kernels (snt_kernels_esp32p4.c) replace the scalar ones,
+# as sanoTTS's snt_kernels_esp32s3.c does on the S3
+sed -i 's/^#if !SANOTTS_S3_SIMD$/#if !SANOTTS_S3_SIMD \&\& !SANOTTS_P4_SIMD/' "$2/snt_kernels_ref.c"
+[ "$(grep -c '^#if !SANOTTS_S3_SIMD && !SANOTTS_P4_SIMD$' "$2/snt_kernels_ref.c")" = 2 ]

@@ -24,6 +24,7 @@ tts(Text) ->
         {ok, Pcm, Info} ->
             Ms = erlang:monotonic_time(millisecond) - T0,
             Audio = byte_size(Pcm) * 1000 div (2 * proplists:get_value(rate, Info)),
-            io:format("BENCH tts: ~p ms for ~p ms of audio (x~.2f real time) ~p~n", [Ms, Audio, Ms / Audio, Info]);
+            io:format("BENCH tts: ~p ms for ~p ms of audio (x~.2f real time), pcm hash ~w ~p~n",
+                      [Ms, Audio, Ms / Audio, erlang:binary_to_list(binary:part(crypto:hash(md5, Pcm), 0, 6)), Info]);
         E -> io:format("BENCH tts failed ~p~n", [E])
     end.

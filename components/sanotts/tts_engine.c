@@ -17,7 +17,7 @@
 #define ARENA_BYTES (84208 + 256)  // the voice's arena peak: constant in utterance length (sanoTTS)
 #define SEED 2236265385529901705ULL  // the component's fixed noise seed
 
-#if SANOTTS_S3_SIMD
+#if SANOTTS_S3_SIMD || SANOTTS_P4_SIMD
 extern int64_t g_snt_macs_simd, g_snt_macs_scalar;
 void snt_res_reset(void);
 #endif
@@ -89,7 +89,7 @@ int tts_say(const char *text, float volume, int16_t **pcm, int *n, tts_stats_t *
     cfg.arena = arena;
     cfg.arena_size = ARENA_BYTES;
     cfg.noise_seed = SEED;
-#if SANOTTS_S3_SIMD
+#if SANOTTS_S3_SIMD || SANOTTS_P4_SIMD
     snt_res_reset();
 #endif
     snt_nano_stats ns;
@@ -101,7 +101,7 @@ int tts_say(const char *text, float volume, int16_t **pcm, int *n, tts_stats_t *
     st->frames = ns.frames;
     st->samples = s.n;
     st->arena_peak = ns.arena_peak;
-#if SANOTTS_S3_SIMD
+#if SANOTTS_S3_SIMD || SANOTTS_P4_SIMD
     st->macs_simd = g_snt_macs_simd;
     st->macs_scalar = g_snt_macs_scalar;
 #endif

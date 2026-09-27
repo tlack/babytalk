@@ -193,7 +193,9 @@ static void do_transcribe(const job_t *j)
     send_transcript(j, rc, &out);
 }
 
-// Result: {ok, Pcm24k, [{rate, 24000}, {phonemes, N}, {g2p_ms, F}, {synth_ms, F}]} | {error, Code}
+// Result: {ok, Pcm24k, [{rate, 24000}, {phonemes, N}, {g2p_ms, F}, {synth_ms, F}, {simd_pct, P}]}
+//         | {error, Code}     simd_pct: the share of int8 multiply-adds on the chip's vector unit
+//         (sanoTTS falls back to scalar silently when an operand doesn't suit it)
 static void do_say(const job_t *j)
 {
     GlobalContext *g = s_glb;
@@ -208,7 +210,7 @@ static void do_say(const job_t *j)
     const size_t bytes = rc ? 0 : (size_t) n * 2;
     Heap heap;
     if (UNLIKELY(memory_init_heap(&heap, MSG_WORDS + TUPLE_SIZE(3) + term_binary_heap_size(bytes)
-                                      + 4 * (CONS_SIZE + TUPLE_SIZE(2)) + 2 * FLOAT_SIZE + TUPLE_SIZE(2)) != MEMORY_GC_OK)) {
+                                      + 5 * (CONS_SIZE + TUPLE_SIZE(2)) + 2 * FLOAT_SIZE + TUPLE_SIZE(2)) != MEMORY_GC_OK)) {
         ESP_LOGE(TAG, "no memory for the speech message");
         heap_caps_free(pcm);  // NULL when tts_say failed
         return;
@@ -221,6 +223,8 @@ static void do_say(const job_t *j)
     } else {
         memcpy((void *) term_binary_data(bin), pcm, bytes);
         term info = term_nil();
+        const int64_t macs = st.macs_simd + st.macs_scalar;
+        info = prop(&heap, atom(g, "\x08" "simd_pct"), term_from_int(macs ? (int) (st.macs_simd * 100 / macs) : 0), info);
         info = prop(&heap, atom(g, A_SYNTH_MS), term_from_float(st.synth_ms, &heap), info);
         info = prop(&heap, atom(g, A_G2P_MS), term_from_float(st.g2p_ms, &heap), info);
         info = prop(&heap, atom(g, A_PHONEMES), term_from_int(st.phonemes), info);

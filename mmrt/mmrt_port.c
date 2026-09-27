@@ -418,6 +418,82 @@ void mmrt_conv1x1_c1(const int8_t *x, int C, const int8_t *w, const int8_t *bias
 }
 #endif
 
+#if defined(MMRT_P4) || defined(MMRT_C1)
+// ---- a block's tail: C, and on the P4 its vector unit (mmrt_p4_tail_row)
+static void tail_c(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y)
+{
+    for (int t = 0; t < T; t++)
+        for (int c = 0; c < C; c++) {
+            const size_t k = (size_t)t * C + c;
+            int32_t v = a[k];
+            if (s) {
+                v = (v * s[c] + (1 << (shift - 1))) >> shift;
+                v = v > 127 ? 127 : (v < -128 ? -128 : v);
+            }
+            if (r) {
+                v += r[k];
+                v = v > 127 ? 127 : (v < -128 ? -128 : v);
+            }
+            y[k] = (int8_t)(relu && v < 0 ? 0 : v);
+        }
+}
+
+#ifdef MMRT_P4
+typedef struct {
+    int groups, shift, relu, pad_;
+    int8_t rnd_a[16], rnd_b[16], ones[16];
+} __attribute__((aligned(16))) mmrt_p4_tail_t;
+void mmrt_p4_tail_row(int8_t *y, const int8_t *a, const int8_t *s, const int8_t *r, const mmrt_p4_tail_t *t);
+
+static void tail_p4(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y)
+{
+    mmrt_p4_tail_t t = {C / 16, shift, relu, 0, {0}, {0}, {0}};
+    rnd_factors(t.rnd_a, t.rnd_b, shift);
+    memset(t.ones, 1, 16);
+    for (int i = 0; i < T; i++) {
+        const size_t off = (size_t)i * C;
+        mmrt_p4_tail_row(y + off, a + off, s, r ? r + off : NULL, &t);
+    }
+}
+
+// the vector tail against C, once: with and without the scale and the residual, every shift
+static int tail_p4_ok(void)
+{
+    static int ok = -1;
+    if (ok >= 0) return ok;
+    enum { T = 3, C = 48 };
+    static int8_t a[T * C] __attribute__((aligned(16))), s[C] __attribute__((aligned(16))),
+        r[T * C] __attribute__((aligned(16))), y1[T * C] __attribute__((aligned(16))), y2[T * C] __attribute__((aligned(16)));
+    uint32_t q = 31337;
+    for (int trial = 0; trial < 52; trial++) {
+        for (int i = 0; i < T * C; i++) a[i] = (int8_t)((q = q * 1103515245 + 12345) >> 16);
+        for (int i = 0; i < T * C; i++) r[i] = (int8_t)((q = q * 1103515245 + 12345) >> 16);
+        for (int i = 0; i < C; i++) s[i] = (int8_t)((q = q * 1103515245 + 12345) >> 16);
+        const int shift = 1 + trial % 13, with_s = trial % 4 != 0, with_r = trial % 4 != 1, relu = (trial / 4) & 1;
+        tail_c(a, with_s ? s : NULL, with_r ? r : NULL, T, C, shift, relu, y1);
+        tail_p4(a, with_s ? s : NULL, with_r ? r : NULL, T, C, shift, relu, y2);
+        if (memcmp(y1, y2, sizeof(y1))) {
+            printf("mmrt: the P4 tail kernel differs (shift %d, scale %d, residual %d): not used\n", shift, with_s, with_r);
+            return ok = 0;
+        }
+    }
+    return ok = 1;
+}
+#endif
+
+void mmrt_tail_c1(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y)
+{
+#ifdef MMRT_P4
+    if (C % 16 == 0 && shift >= 1 && shift <= 13 && !(((uintptr_t)a | (uintptr_t)s | (uintptr_t)r | (uintptr_t)y) & 15)
+        && tail_p4_ok()) {
+        tail_p4(a, s, r, T, C, shift, relu, y);
+        return;
+    }
+#endif
+    tail_c(a, s, r, T, C, shift, relu, y);
+}
+#endif
+
 #ifdef MMRT_P4
 // the group kernel against the same arithmetic in C, once: biases, strides, every shift
 static int s_c1_ok = -1;

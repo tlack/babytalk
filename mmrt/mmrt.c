@@ -233,7 +233,7 @@ void mmrt_close(mmrt_model_t *m, mmrt_free_fn release)
 
 static int conv_out_len(int T, int K, int stride, int pad) { return (T + 2 * pad - K) / stride + 1; }
 
-#ifdef MMRT_S3
+#if defined(MMRT_S3) || defined(MMRT_C1)
 // A LUT op that is exactly ReLU at an unchanged exponent (vector max instead of a lookup).
 static int is_relu_lut(const mmrt_model_t *m, const mmrt_op_t *op)
 {
@@ -326,7 +326,8 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
 
     for (int i = 0; i < n_ops; i++) {
         const mmrt_op_t *op = &m->ops[i];
-#ifdef MMRT_S3
+#if defined(MMRT_S3) || defined(MMRT_C1)
+        // a block's tail (scale, residual add, ReLU) in one pass (the P4's: mmrt_port.c)
         if (!mmrt_use_ref && (op->kind == MMRT_MUL || op->kind == MMRT_ADD)) {
             const int8_t *a, *s, *r;
             int shift;
@@ -340,7 +341,11 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                     free(last);
                     return NULL;
                 }
+#ifdef MMRT_S3
                 mmrt_s3_tail(a, s, r, T, C, shift, 1, y);
+#else
+                mmrt_tail_c1(a, s, r, T, C, shift, 1, y);
+#endif
                 m->buf[out] = y;
                 m->T[out] = T;
                 if (mmrt_trace) mmrt_trace(i + span - 1, &m->ops[i + span - 1], y, T, C);

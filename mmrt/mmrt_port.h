@@ -56,6 +56,11 @@ int mmrt_c1_bias_block(int8_t blk[256], const int32_t *bias16);
 void mmrt_conv1x1_c1(const int8_t *x, int C, const int8_t *w, const int8_t *bias_blks, int N, int stride,
                      int shift, int relu, int8_t *y, int T_out);
 void mmrt_c1_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride);
+
+// A block's tail over T rows of C: m = s ? sat8(round_half_up(a * s >> shift)) : a (s a [C]
+// vector, shift >= 1), v = r ? sat8(m + r) : m ([T][C]), y = relu ? max(v, 0) : v. On the P4
+// its vector unit when it can (mmrt_p4_tail_row), else C.
+void mmrt_tail_c1(const int8_t *a, const int8_t *s, const int8_t *r, int T, int C, int shift, int relu, int8_t *y);
 #endif
 
 #ifdef __cplusplus

@@ -336,3 +336,53 @@ mmrt_p4_cb4_rows:
     bnez    a3, .Lcb4_row
     ret
     .size   mmrt_p4_cb4_rows, . - mmrt_p4_cb4_rows
+
+// void mmrt_p4_tail_row(int8_t *y, const int8_t *a, const int8_t *s, const int8_t *r,
+//                       const mmrt_p4_tail_t *t)
+//
+// A Citrinet block's tail for one time row, all channel groups (the S3's mmrt_s3_tail_row):
+//   m = s ? sat8(round_half_up(a[i] * s[i] >> shift)) : a[i]     (SE scale, 1 <= shift <= 13)
+//   v = r ? sat8(m + r[i]) : m                                    (residual add)
+//   y = relu ? max(v, 0) : v
+// t: +0 groups, +4 shift, +8 relu, then at +16 and +32 the rounding term's factors (as
+// mmrt_p4_dw_row), at +48 sixteen ones. The residual add goes through the accumulator (m * 1 +
+// r * 1, read out by the saturating shift) rather than esp.vadd.s8, whose saturation isn't
+// documented. s/r may be NULL. All pointers 16-byte aligned.
+    .text
+    .align  4
+    .global mmrt_p4_tail_row
+    .type   mmrt_p4_tail_row, @function
+mmrt_p4_tail_row:
+    lw      t3, 0(a4)               // groups
+    lw      t4, 4(a4)               // shift
+    lw      t1, 8(a4)               // relu
+    addi    t6, a4, 16
+    esp.vld.128.ip  q5, t6, 16      // rnd_a
+    esp.vld.128.ip  q4, t6, 16      // rnd_b (lane 0)
+    esp.vld.128.ip  q7, t6, 16      // ones
+    esp.zero.q      q6
+    li      t5, 0                   // (a shift of 0, for the add's read-out)
+.Ltail_group:
+    esp.vld.128.ip  q3, a1, 16      // a
+    beqz    a2, .Ltail_nomul
+    esp.vld.128.ip  q1, a2, 16      // s
+    esp.zero.qacc
+    esp.vmulas.s8.qacc q3, q1       // a * s
+    esp.vsmulas.s8.qacc q5, q4, 0   // + 2^(shift - 1)
+    esp.srcmb.s8.qacc q3, t4, 1     // m = sat8(... >> shift)
+.Ltail_nomul:
+    beqz    a3, .Ltail_noadd
+    esp.vld.128.ip  q2, a3, 16      // r
+    esp.zero.qacc
+    esp.vmulas.s8.qacc q3, q7       // m
+    esp.vmulas.s8.qacc q2, q7       // + r
+    esp.srcmb.s8.qacc q3, t5, 1     // sat8(m + r)
+.Ltail_noadd:
+    beqz    t1, .Ltail_store
+    esp.vmax.s8     q3, q3, q6
+.Ltail_store:
+    esp.vst.128.ip  q3, a0, 16
+    addi    t3, t3, -1
+    bnez    t3, .Ltail_group
+    ret
+    .size   mmrt_p4_tail_row, . - mmrt_p4_tail_row

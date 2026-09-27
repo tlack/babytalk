@@ -1,7 +1,8 @@
-# BabyTalk and MMRT for AtomVM (Erlang / Elixir on the ESP32-S3)
+# BabyTalk and MMRT for AtomVM (Erlang / Elixir on the ESP32-S3 and ESP32-P4)
 
 On-device speech to text, text to speech, a wake phrase, microphone and speaker, plus the
-int8/int4 vector kernels underneath, for [AtomVM](https://github.com/atomvm/AtomVM) **v0.7.0-alpha.1** on the ESP32-S3.
+int8/int4 vector kernels underneath, for [AtomVM](https://github.com/atomvm/AtomVM) **v0.7.0-alpha.1** on the ESP32-S3,
+and BabyTalk (not the `mmrt` module) on the ESP32-P4 as well.
 Everything runs on the board: no cloud, no network needed (WiFi is only for the test tools).
 
 ```erlang
@@ -21,11 +22,14 @@ Two libraries, usable separately:
 
 | | What | Module | Needs |
 |---|---|---|---|
-| **MMRT** | int8/int4 matvec, matmul, dot, requant, top-k... on the S3's SIMD unit | `mmrt` / `MMRT` | nothing board-specific |
+| **MMRT** | int8/int4 matvec, matmul, dot, requant, top-k... on the S3's SIMD unit | `mmrt` / `MMRT` | an ESP32-S3 (the NIFs are S3-only) |
 | **BabyTalk** | speech to text, text to speech, wake phrase, mic + speaker | `babytalk`, `babytalk_listener` / `BabyTalk` | the model partition; our audio drivers (below) |
 
 Status: all of it works on the Waveshare ESP32-S3-CAM -- say "wake up tomato face", wait for
-the chime, say something, and the board says it back (`apps/listen_demo`).
+the chime, say something, and the board says it back (`apps/listen_demo`). On the **Waveshare
+ESP32-P4-WIFI6**, BabyTalk's speaker, mic, speech synthesis and speech recognition run
+([../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md)); a transcript of
+live speech on that board is still to be checked.
 
 ## Device drivers: we bring our own
 
@@ -41,7 +45,18 @@ written for one board, the **Waveshare ESP32-S3-CAM**:
 | **NS4150B** | 3 W class-D speaker amp | enable = expander P4, on only while playing | `board_audio.c` | working |
 
 All four sit behind one module, `board_audio.c`, because the two codecs share I2S port 0's
-clock pins: the port is either capturing or playing, never both. These use ESP-IDF 5.5's current drivers (`i2c_master`, `i2s_std`). ESP-IDF aborts at boot if
+clock pins: the port is either capturing or playing, never both.
+
+The **Waveshare ESP32-P4-WIFI6** has a simpler audio path, in
+`board_audio_p4_wifi6.c` (`CONFIG_BABYTALK_BOARD_WAVESHARE_P4_WIFI6`, the default on a P4):
+
+| Chip | Role | Bus | Status |
+|---|---|---|---|
+| **Everest ES8311** | mono codec: its ADC takes the board's mic, its DAC the speaker | I2C `0x18` (SDA 7, SCL 8) + I2S 0 (MCLK 13, BCLK 12, WS 10, out 9, in 11) | working |
+| **NS4150B** | 3 W class-D speaker amp | enable = GPIO 53, on only while playing | working |
+
+Your own board: select `CONFIG_BABYTALK_BOARD_CUSTOM` and implement `board_audio.h` in your
+own component (`board_audio_p4_wifi6.c` is a good starting point for any one-ES8311 board). These use ESP-IDF 5.5's current drivers (`i2c_master`, `i2s_std`). ESP-IDF aborts at boot if
 the legacy I2C driver is linked next to the new one, so this firmware **turns off AtomVM's own
 I2C** (`CONFIG_AVM_ENABLE_I2C_PORT_DRIVER=n`, `..._RESOURCE_NIFS=n`): Erlang code gets no
 `i2c` module on this build, and C owns the bus. (Revisit when AtomVM moves to the new I2C
@@ -156,6 +171,11 @@ firmware builds without text to speech), applies
 `sdkconfig.babytalk` and builds. The Erlang/Elixir standard libraries (`boot.avm`) come from
 the official release image, so no host build of AtomVM is needed.
 
+`build.sh` targets the ESP32-S3. Building for an **ESP32-P4** (with an ESP32-C6 for WiFi)
+takes a few changes: the target, AtomVM's P4 presets, a WiFi co-processor dependency, one
+AtomVM patch and two BabyTalk settings. They're listed in
+[../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md), section 3.
+
 | Partition | Offset | Size | |
 |---|---|---|---|
 | factory | 0x10000 | 4 MB | AtomVM + NIFs + sanoTTS (its dictionary and voice: ~1.9 MB) |
@@ -184,6 +204,11 @@ talk to it; the phrase is stored as the model's own spelling of how you said it)
   underruns.
 - **Internal RAM**: 116 KB free at start (after the engines' 84.5 KB shared pool is
   reserved), 42 KB after WiFi joins, ~31 KB during inference.
+
+On the **ESP32-P4** (Waveshare ESP32-P4-WIFI6, 360 MHz): 2 s of speech transcribed in 0.87 s,
+8 s in 3.6 s; speech synthesis 0.71x real time (sanoTTS's scalar kernels); 295 KB of internal
+RAM free at boot, ~227 KB online. Details:
+[../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md).
 
 ## Things we learned (AtomVM specifics)
 

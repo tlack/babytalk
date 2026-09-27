@@ -3,7 +3,7 @@
 ![BabyTalk: small AI models for speech to text and text to speech on ESP32 microcontrollers](docs/babytalk-splash.png)
 
 **BabyTalk** makes an ESP32-S3 that **understands what you say and talks back, with no
-cloud and no internet**, driven from MicroPython:
+cloud and no internet**, driven from MicroPython (or an ESP32-P4, from AtomVM):
 
 ```python
 import stt, tts
@@ -55,6 +55,9 @@ expert adapters for the speech model. They aren't used yet.)
 - A microphone (and a speaker for text to speech). Everything was built and tested on the
   **Waveshare ESP32-S3-CAM** (ES7210 mic, ES8311 speaker codec), and the examples use its
   pins and drivers. On another board, give `stt` 16 kHz PCM from whatever mic you have.
+- Or, from AtomVM only: an **ESP32-P4**. The **Waveshare ESP32-P4-WIFI6** (ES8311 mic and
+  speaker codec) is supported; transcription runs at about 1.6x the S3's time
+  ([docs/BOARD_WAVESHARE_P4_WIFI6.md](docs/BOARD_WAVESHARE_P4_WIFI6.md)).
 - To build: Linux or WSL, [ESP-IDF v5.5.1](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/),
   and [uv](https://docs.astral.sh/uv/) for the Python tools.
 
@@ -93,6 +96,8 @@ size, with identical output:
   doing 16 multiply-adds per instruction.
 - It **fuses layers** so intermediate results stay in internal RAM, and on short clips it
   overlaps copying the next layer's weights with computing the current one.
+- On other chips it has **portable C kernels**, and on the ESP32-P4 kernels for that chip's
+  vector unit.
 - It loads **8-bit or 4-bit weights**, and every kernel is tested bit for bit against a
   plain C version.
 
@@ -157,7 +162,7 @@ Tested from the board's internal filesystem (not an SD card): installing and ver
 
 | folder | what |
 |---|---|
-| `mmrt/` | the int8/int4 inference runtime (C + ESP32-S3 SIMD assembly) |
+| `mmrt/` | the int8/int4 inference runtime (C + ESP32-S3 and ESP32-P4 SIMD assembly) |
 | `components/` | ESP-IDF components shared by the firmwares: `mmrt`, `stt_engine`, `sram_pool`, `sanotts` |
 | `mpy/` | the MicroPython firmware: `stt` and `tts` modules, codec drivers, examples |
 | `atomvm/` | the AtomVM (Erlang/Elixir) firmware: NIFs, libraries, demo apps |
@@ -321,7 +326,8 @@ cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune on t
 
 ## BabyTalk for AtomVM (Erlang / Elixir)
 
-The same engine, from Erlang and Elixir on AtomVM v0.7 ([atomvm/README.md](atomvm/README.md)):
+The same engine, from Erlang and Elixir on AtomVM v0.7 ([atomvm/README.md](atomvm/README.md)),
+on the ESP32-S3 and the ESP32-P4:
 speech to text, text to speech, a wake phrase with audible chimes, microphone and speaker,
 run by a supervised `gen_server`, plus **MMRT** as a standalone library of int8/int4 vector kernels
 (matvec, matmul, dot, top-k... on the S3's SIMD unit) for any AtomVM project. Transcripts are
@@ -343,7 +349,8 @@ ok = babytalk:speak([<<"You said: ">>, Text]).
   noise; the fine-tuned model (above) isn't quantized for the board yet.
 - The int4 model trades ~2 points of accuracy for size (see the table above).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
-- Tested on one board. Another ESP32-S3 board needs its own pins and audio codec driver.
+- Tested on two boards: the Waveshare ESP32-S3-CAM, and (from AtomVM) the Waveshare
+  ESP32-P4-WIFI6. Another board needs its own pins and audio codec driver (`board_audio.h`).
 - Listening and speaking take turns (they share one block of internal RAM).
 - Under MicroPython, speech to text can't run while WiFi is on: WiFi takes the internal RAM
   it needs (6.7 KB left). The AtomVM firmware keeps ~42 KB with WiFi up and can.

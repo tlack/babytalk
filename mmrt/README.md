@@ -1,8 +1,9 @@
 # MMRT: the micromodels runtime
 
-MMRT runs the Citrinet speech recognizer on an ESP32-S3. It is a few thousand lines of C
-and assembly: a model file format, an executor, portable reference operations, and
-hand-written kernels for the ESP32-S3's vector instructions (PIE). It runs any model
+MMRT runs the Citrinet speech recognizer on an ESP32-S3, and on an ESP32-P4 (see [Other
+chips](#other-chips-the-esp32-p4)). It is a few thousand lines of C and assembly: a model file
+format, an executor, portable reference operations, and hand-written kernels for the
+ESP32-S3's vector instructions (PIE) and the ESP32-P4's. It runs any model
 built from the same handful of operations: 1D depthwise and pointwise (1x1)
 convolutions, mean, lookup tables, multiply and add. Citrinet and similar convolutional
 speech models fit that description.
@@ -80,10 +81,12 @@ const int8_t *logits = mmrt_run(&m, features, T_in, &T_out, alloc, release);  //
 ```
 
 `alloc`/`release` supply activation memory (PSRAM on the S3). `mmrt_cache_weights()`
-enables the PSRAM cache. Build with `MMRT_S3` defined for the S3 kernels. Without it you
-get the portable C reference, which is how the PC tools run the same file. The complete
-speech-to-text pipeline around it (audio features, decoding, wake phrases) is
-`components/stt_engine/`.
+enables the PSRAM cache. Build with `MMRT_S3` defined for the S3 kernels; without it, add
+`mmrt_port.c` and you get the portable kernels (the reference's arithmetic, laid out for
+speed), which is how the PC tools run the same file. `MMRT_P4` adds the ESP32-P4's vector
+kernels (`mmrt_p4.S`, see below). The complete speech-to-text pipeline around it (audio
+features, decoding, wake phrases) is `components/stt_engine/`, and the ESP-IDF component
+`components/mmrt` picks the right files for the target chip.
 
 | file | what |
 |---|---|
@@ -91,6 +94,8 @@ speech-to-text pipeline around it (audio features, decoding, wake phrases) is
 | `mmrt_ref.c/.h` | portable reference operations: the definition of correct |
 | `mmrt_s3.S` | PIE kernels: 1x1 conv, depthwise conv, fused block tail, column sums, CB4 decode |
 | `mmrt_s3.c/.h` | drivers: weight staging, two-core split, streaming, fusion, buffers |
+| `mmrt_port.c/.h` | portable kernels for other chips, bit-exact with the reference; on the P4 also the drivers for its vector kernels (two-core split, self-checks) |
+| `mmrt_p4.S` | the ESP32-P4's vector kernels: int8 dot product, depthwise conv |
 
 ## Results (Waveshare ESP32-S3-CAM, ESP-IDF app, milliseconds of model time)
 
@@ -139,3 +144,43 @@ once per 1,000 calls, only with both cores running. The same loop with a `nop` b
 its end, or without pipelining, was clean in 10,000 calls. It was no faster end to end,
 so it was removed. Since then every kernel change gets a two-core soak test, not just the
 single-shot `ktest`.
+
+## Other chips: the ESP32-P4
+
+On a chip without the S3's vector unit, MMRT runs **portable kernels** (`mmrt_port.c`). These
+are the reference's arithmetic, bit for bit, laid out for speed: sixteen outputs at a time from
+the packed weights, and zero inputs (after a ReLU, most of them) skipped.
+
+The **ESP32-P4** has a vector unit of its own (the `Xesppie` RISC-V extension, 128-bit
+registers). MMRT uses it as follows (`MMRT_P4`, set by `components/mmrt` for `esp32p4`):
+
+- **1x1 convolutions as row dot products.** Each output's weights are unpacked and rearranged
+  into one contiguous row, once per boot, and kept in PSRAM (9.8 MB for Citrinet-256). Each
+  output is then a dot product of 16 int8s per `esp.vmulas.s8.xacc`, into a 40-bit
+  accumulator. The frames go 32 at a time, so a tile and a row of weights meet in cache, and
+  the two cores take half the frames each.
+- **Depthwise convolutions** on `esp.vmulas.s8.qacc`, 16 channels per instruction: the S3's
+  kernel, ported.
+- Each vector kernel **checks itself** against the portable one on a test layer before its
+  first use, and stays unused if they differ.
+- Activations go to **internal RAM** when they fit (`components/stt_engine`).
+
+The host checker runs the P4's path with its dot products in C
+(`MMRT_CFLAGS=-DMMRT_ROWDOT uv run export/mmrt_check_model.py`): the whole model is bit-exact.
+
+**Speed history on the P4** (transcribing 2 s of speech, int4 model, bit-exact at every step):
+
+| step | 2 s | 8 s |
+|---|---|---|
+| reference kernels (`mmrt_ref.c`) | 14.4 s | |
+| portable kernels | 8.7 s | |
+| + 1x1 as vector dot products, rows kept | 2.7 s | |
+| + depthwise on the vector unit | 1.25 s | |
+| + 1x1 on both cores | 0.91 s | |
+| + activations in internal RAM | 0.83 s | 30 s |
+| + frames in tiles of 32 | 0.87 s | 3.6 s |
+
+The S3 does 2 s in 0.53 s. What separates them: the S3's kernels stream weights through
+SRAM on the other core, fuse depthwise into 1x1 and use its 16-lane accumulator for the 1x1
+too. Those are the next steps for the P4. The P4's own quirks (saturation, its zero-overhead
+loop, registers, RTC RAM) are in `docs/BOARD_WAVESHARE_P4_WIFI6.md`.

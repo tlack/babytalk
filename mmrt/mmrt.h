@@ -85,6 +85,8 @@ typedef struct {
     int8_t **buf;             // activation buffers (NULL when not live)
     const int8_t **wcache;    // per op: faster copy of its weights (e.g. PSRAM), or NULL
     size_t wcache_bytes;
+    int8_t **wrows;           // per 1x1 op: its weights as rows (MMRT_ROWDOT: made on first use, kept)
+    size_t wrows_bytes;
 } mmrt_model_t;
 
 // Allocator hooks: activations can be large (PSRAM on the S3).

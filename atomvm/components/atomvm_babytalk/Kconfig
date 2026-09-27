@@ -27,6 +27,7 @@ config BABYTALK_STACKS_IN_PSRAM
 
 choice BABYTALK_BOARD
     prompt "BabyTalk audio board"
+    default BABYTALK_BOARD_WAVESHARE_P4_WIFI6 if IDF_TARGET_ESP32P4
     default BABYTALK_BOARD_WAVESHARE_S3_CAM
     depends on AVM_ENABLE_BABYTALK_NIFS
     help
@@ -35,6 +36,10 @@ choice BABYTALK_BOARD
 
 config BABYTALK_BOARD_WAVESHARE_S3_CAM
     bool "Waveshare ESP32-S3-CAM (ES7210 mics, ES8311 + NS4150B speaker, CH32V003 expander)"
+
+config BABYTALK_BOARD_WAVESHARE_P4_WIFI6
+    bool "Waveshare ESP32-P4-WIFI6 (ES8311 mic + speaker, NS4150B amp on GPIO 53)"
+    depends on IDF_TARGET_ESP32P4
 
 config BABYTALK_BOARD_CUSTOM
     bool "Custom: another component implements board_audio.h"

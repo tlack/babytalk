@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "citrinet_tables.h"
+#include "sdkconfig.h"
 #include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
@@ -11,13 +12,17 @@
 #include "freertos/task.h"
 #include "kws.h"
 #include "mmrt.h"
+#ifdef MMRT_S3
 #include "mmrt_s3.h"
+#endif
 #include "stt_core.h"
 #include "sram_pool.h"
 
+#ifdef MMRT_S3  // the S3 kernels stage weights in the shared SRAM pool; the reference ones don't
 #define POOL_OWNER_STT 1
 static void *pool_get(size_t bytes);
 static void pool_put(void);
+#endif
 
 static mmrt_model_t s_model;
 static int s_open;
@@ -28,10 +33,17 @@ static size_t s_act_max, s_act_reserve = 40 * 1024;
 static void *psram_alloc(size_t n) { return heap_caps_aligned_alloc(16, n ? n : 1, MALLOC_CAP_SPIRAM); }
 static void mem_free(void *p) { heap_caps_free(p); }
 
+// Activations in internal RAM when there's room: on the ESP32-P4 DMA-capable internal RAM, which
+// leaves out its low-power RTC RAM (the vector unit MMRT uses there can't read it)
+#ifdef CONFIG_IDF_TARGET_ESP32P4
+#define ACT_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)
+#else
+#define ACT_CAPS MALLOC_CAP_INTERNAL
+#endif
 static void *act_alloc(size_t n)
 {
-    if (n && n <= s_act_max && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= n + s_act_reserve) {
-        void *p = heap_caps_aligned_alloc(16, n, MALLOC_CAP_INTERNAL);
+    if (n && n <= s_act_max && heap_caps_get_free_size(ACT_CAPS) >= n + s_act_reserve) {
+        void *p = heap_caps_aligned_alloc(16, n, ACT_CAPS);
         if (p) return p;
     }
     return psram_alloc(n);
@@ -54,8 +66,19 @@ int stt_engine_open(void)
     if (mmrt_open(&s_model, img, img_size)) return -2;
     const mmrt_header_t *hd = s_model.hdr;
     s_model_bytes = hd->blob_off + hd->blob_size;
+#ifdef MMRT_S3
     mmrt_s3_set_buffer_provider(pool_get, pool_put);
     if (mmrt_s3_init()) return -3;
+#endif
+#ifdef CONFIG_IDF_TARGET_ESP32P4
+    // The P4's kernels read activations straight from memory (the S3's stage them through SRAM
+    // tiles): with its internal RAM to spare, activations go there whenever they fit, for the
+    // time of a run (2 s of speech: 835 ms, against 916 with them in PSRAM)
+    if (!s_act_max) {
+        s_act_max = 96 * 1024;
+        s_act_reserve = 40 * 1024;
+    }
+#endif
     kws_init(VOCAB, VOCAB_N);
     s_open = 1;
     return 0;
@@ -63,6 +86,7 @@ int stt_engine_open(void)
 
 static volatile int s_busy;  // background task state (defined with the task below)
 
+#ifdef MMRT_S3
 // Staging buffers come from the shared SRAM pool (sram_pool.h); another engine (tts) may
 // take the pool back whenever stt is idle, and the next run re-acquires it.
 static int evict_stt(void)
@@ -76,13 +100,16 @@ static void *pool_get(size_t bytes)
     return bytes <= SRAM_POOL_BYTES ? sram_pool_acquire(POOL_OWNER_STT, evict_stt) : NULL;
 }
 static void pool_put(void) { sram_pool_release(POOL_OWNER_STT); }
+#endif
 
 void stt_engine_close(void)
 {
     if (!s_open || s_busy) return;
     mmrt_cache_weights(&s_model, 0, psram_alloc, mem_free);
     mmrt_close(&s_model, mem_free);
+#ifdef MMRT_S3
     mmrt_s3_deinit();
+#endif
     s_open = 0;
 }
 
@@ -131,7 +158,9 @@ int stt_engine_run(const int16_t *pcm, int n, stt_result_t *r)
     if (!s_open) return -1;
     const int T = stt_num_frames(n);
     if (n < MEL_HOP || T > 4 * STT_WIN_FRAMES) return -4;
+#ifdef MMRT_S3
     if (mmrt_s3_init()) return -3;  // (re)acquire the staging buffers
+#endif
     r->frames = T;
     int64_t t0 = esp_timer_get_time();
     float *feats = (float *)psram_alloc(sizeof(float) * T * MEL_N);

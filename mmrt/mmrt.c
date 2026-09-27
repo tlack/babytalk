@@ -3,18 +3,39 @@
 // build swaps in PIE kernels op by op, each checked against these.
 #include "mmrt.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "mmrt_ref.h"
 #ifdef MMRT_S3
 #include "mmrt_s3.h"
+#else
+#include "mmrt_port.h"
+#endif
+#ifdef MMRT_P4
+// The P4's vector unit can't load from its low-power RTC RAM, which ESP-IDF counts as internal
+// heap: buffers there take the portable path, and the kept weight rows go to PSRAM.
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
+#define SIMD_REACH(p) (!esp_ptr_in_rtc_dram_fast(p) && !esp_ptr_in_rtc_slow(p))
+#define ROWS_ALLOC(n) heap_caps_aligned_alloc(16, (n), MALLOC_CAP_SPIRAM)
+#else
+#define SIMD_REACH(p) 1
+#define ROWS_ALLOC(n) aligned_alloc(16, (n))
 #endif
 
 mmrt_trace_fn mmrt_trace;
 int mmrt_use_ref;
 
 #define NONE16 0xffff
+
+// the 1x1 conv without the S3's kernels: the portable one, or the reference when asked for
+#ifdef MMRT_S3
+#define CONV1X1 mmrt_conv1x1_ref
+#else
+#define CONV1X1(...) (mmrt_use_ref ? mmrt_conv1x1_ref(__VA_ARGS__) : mmrt_conv1x1_port(__VA_ARGS__))
+#endif
 
 int mmrt_open(mmrt_model_t *m, const void *image, size_t size)
 {
@@ -102,8 +123,41 @@ done:
     return m->wcache_bytes;
 }
 
+#ifdef MMRT_ROWDOT
+// op i's 1x1 weights as rows ([N][C], 16-byte aligned), decoded and repacked on first use and
+// kept (C x N bytes each: ~9.8 MB for all of Citrinet-256 -- a board with PSRAM to spare); NULL
+// if there's no memory for them (the op then runs on the portable kernel)
+static const int8_t *op_rows(mmrt_model_t *m, int i, const int8_t *w, int wfmt, int C, int N,
+                             mmrt_alloc_fn alloc, mmrt_free_fn release)
+{
+    if (!m->wrows) m->wrows = (int8_t **)calloc(m->hdr->n_ops, sizeof(*m->wrows));
+    if (!m->wrows) return NULL;
+    if (m->wrows[i]) return m->wrows[i];
+    int8_t *r = (int8_t *)ROWS_ALLOC((size_t)C * N), *wd = NULL;
+    if (!r) return NULL;
+    if (wfmt != MMRT_W_INT8) {
+        if (!(wd = (int8_t *)alloc((size_t)C * N))) {
+            free(r);
+            return NULL;
+        }
+        mmrt_wload(wd, w, wfmt, C, 0, N / 16);
+    }
+    mmrt_repack_nc(r, wd ? wd : w, C, N);
+    if (wd) release(wd);
+    m->wrows[i] = r;
+    m->wrows_bytes += (size_t)C * N;
+    return r;
+}
+#endif
+
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release)
 {
+    if (m->wrows) {
+        for (uint32_t i = 0; i < m->hdr->n_ops; i++) free(m->wrows[i]);
+        free(m->wrows);
+        m->wrows = NULL;
+        m->wrows_bytes = 0;
+    }
     mmrt_cache_weights(m, 0, NULL, release);
     if (m->buf) {
         for (uint32_t i = 0; i < m->hdr->n_tensors; i++)
@@ -291,8 +345,19 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             if (!mmrt_use_ref)
                 mmrt_s3_dwconv(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
             else
-#endif
                 mmrt_dwconv_ref(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
+#else
+            if (mmrt_use_ref || Cx % 16)
+                mmrt_dwconv_ref(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
+#ifdef MMRT_P4  // the vector kernel, unless it declines (then the portable one)
+            else if (!SIMD_REACH(x) || !SIMD_REACH(y)
+                     || mmrt_dwconv_p4(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty))
+                mmrt_dwconv_port(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
+#else
+            else
+                mmrt_dwconv_port(x, Tx, Cx, w, op->K, op->stride, op->pad, op->shift, op->relu, y, Ty);
+#endif
+#endif
             break;
         case MMRT_CONV1X1:
         {
@@ -302,9 +367,23 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                 mmrt_s3_conv1x1(x, Tx, Cx, w, op->wfmt, b, Cy, op->stride, op->shift, op->relu, y, Ty);
             else
 #endif
+#ifdef MMRT_ROWDOT
+            // a vector dot product (the P4's): each output's weights as one contiguous row
+#ifdef MMRT_P4
+            static int dot_ok = -1;
+            if (dot_ok < 0) dot_ok = mmrt_dot_p4_check();
+#else
+            const int dot_ok = 1;
+#endif
+            const int8_t *wr = !mmrt_use_ref && dot_ok && Cx % 16 == 0 && !((uintptr_t)x & 15) && Cy % 16 == 0 && SIMD_REACH(x)
+                                   ? op_rows(m, i, w, op->wfmt, Cx, Cy, alloc, release) : NULL;
+            if (wr)
+                mmrt_conv1x1_nc(x, Cx, wr, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+            else
+#endif
             if (op->wfmt == MMRT_W_INT8) {
-                mmrt_conv1x1_ref(x, Tx, Cx, w, b, Cy, op->stride, op->shift, op->relu, y, Ty);
-            } else {  // reference path: decode the whole op first
+                CONV1X1(x, Tx, Cx, w, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+            } else {  // reference and portable paths: decode the whole op first
                 int8_t *wd = (int8_t *)alloc((size_t)Cx * Cy);
                 if (!wd) {
                     release(y);
@@ -313,7 +392,7 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
                     return NULL;
                 }
                 mmrt_wload(wd, w, op->wfmt, Cx, 0, Cy / 16);
-                mmrt_conv1x1_ref(x, Tx, Cx, wd, b, Cy, op->stride, op->shift, op->relu, y, Ty);
+                CONV1X1(x, Tx, Cx, wd, b, Cy, op->stride, op->shift, op->relu, y, Ty);
                 release(wd);
             }
         }

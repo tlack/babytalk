@@ -5,6 +5,7 @@ transcript with ESP-PPQ's simulation (data/models/mmrt/ref/*.npz).
   uv run mmrt_check_model.py [clip ...]
 """
 import argparse
+import os
 import ctypes
 import subprocess
 from pathlib import Path
@@ -28,8 +29,9 @@ FREE = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
 def build():
     LIB.parent.mkdir(exist_ok=True)
     src = ROOT / "mmrt"
-    subprocess.check_call(["gcc", "-O2", "-Wall", "-Wextra", "-shared", "-fPIC", "-o", str(LIB),
-                           str(src / "mmrt.c"), str(src / "mmrt_ref.c")])
+    # MMRT_CFLAGS: e.g. -DMMRT_ROWDOT, to check the ESP32-P4's path (its dot products in C here)
+    subprocess.check_call(["gcc", "-O2", "-Wall", "-Wextra", "-shared", "-fPIC", *os.environ.get("MMRT_CFLAGS", "").split(), "-o", str(LIB),
+                           str(src / "mmrt.c"), str(src / "mmrt_ref.c"), str(src / "mmrt_port.c")])
     return ctypes.CDLL(str(LIB))
 
 

@@ -20,9 +20,11 @@
 #include "esp_memory_utils.h"
 #define SIMD_REACH(p) (!esp_ptr_in_rtc_dram_fast(p) && !esp_ptr_in_rtc_slow(p))
 #define ROWS_ALLOC(n) heap_caps_aligned_alloc(16, (n), MALLOC_CAP_SPIRAM)
+#define C1_READY() mmrt_p4_matmul_ok()
 #else
 #define SIMD_REACH(p) 1
 #define ROWS_ALLOC(n) aligned_alloc(16, (n))
+#define C1_READY() 1
 #endif
 
 mmrt_trace_fn mmrt_trace;
@@ -68,6 +70,14 @@ void mmrt_wload(int8_t *dst, const int8_t *w, int wfmt, int C, int g0, int ng)
 #ifdef MMRT_S3
     if (!mmrt_use_ref) {
         for (int g = 0; g < ng; g++, src += gb, dst += (size_t)C * 16) mmrt_s3_cb4_group(dst, src, C);
+        return;
+    }
+#endif
+#ifndef MMRT_S3
+    if (!mmrt_use_ref) {  // the portable decoder: a pair of weights per lookup
+        uint16_t *pt = (uint16_t *)malloc(MMRT_CB4_SCRATCH);
+        for (int g = 0; g < ng; g++, src += gb, dst += (size_t)C * 16) mmrt_cb4_group_port(dst, src, C, pt);
+        free(pt);
         return;
     }
 #endif
@@ -123,6 +133,50 @@ done:
     return m->wcache_bytes;
 }
 
+// wbias[i] (MMRT_C1): the op has a bias too large for the group kernel
+static const int8_t C1_NO_BIAS = 0;
+
+#ifdef MMRT_C1
+
+// op i's 1x1 weights packed [N/16][C][16] int8 for the group kernel -- INT8 ones where they are,
+// CB4 ones decoded once and kept (PSRAM) -- and its bias as weight blocks (*bias NULL: none).
+// 0 if the op can't take this path (no memory, or a bias too large): then the next one.
+static int op_c1(mmrt_model_t *m, int i, const int8_t *w, int wfmt, int C, int N, const int32_t *bias,
+                 const int8_t **wc, const int8_t **bias_blks)
+{
+    const uint32_t n = m->hdr->n_ops;
+    if (!m->wdec && !(m->wdec = (int8_t **)calloc(n, sizeof(*m->wdec)))) return 0;
+    if (!m->wbias && !(m->wbias = (int8_t **)calloc(n, sizeof(*m->wbias)))) return 0;
+    if (m->wbias[i] == &C1_NO_BIAS) return 0;
+    if (bias && !m->wbias[i]) {
+        int8_t *blks = (int8_t *)ROWS_ALLOC((size_t)N / 16 * 256);
+        if (!blks) return 0;
+        for (int g = 0; g < N / 16; g++)
+            if (mmrt_c1_bias_block(blks + g * 256, bias + g * 16)) {
+                free(blks);
+                m->wbias[i] = (int8_t *)&C1_NO_BIAS;
+                return 0;
+            }
+        m->wbias[i] = blks;
+    }
+    if (wfmt == MMRT_W_INT8) {
+        if ((uintptr_t)w & 15) return 0;
+        *wc = w;
+    } else {
+        if (!m->wdec[i]) {
+            int8_t *d = (int8_t *)ROWS_ALLOC((size_t)C * N);
+            if (!d) return 0;
+            mmrt_wload(d, w, wfmt, C, 0, N / 16);
+            m->wdec[i] = d;
+            m->wdec_bytes += (size_t)C * N;
+        }
+        *wc = m->wdec[i];
+    }
+    *bias_blks = bias ? m->wbias[i] : NULL;
+    return 1;
+}
+#endif
+
 #ifdef MMRT_ROWDOT
 // op i's 1x1 weights as rows ([N][C], 16-byte aligned), decoded and repacked on first use and
 // kept (C x N bytes each: ~9.8 MB for all of Citrinet-256 -- a board with PSRAM to spare); NULL
@@ -152,6 +206,15 @@ static const int8_t *op_rows(mmrt_model_t *m, int i, const int8_t *w, int wfmt, 
 
 void mmrt_close(mmrt_model_t *m, mmrt_free_fn release)
 {
+    for (int k = 0; k < 2; k++) {
+        int8_t **c = k ? m->wbias : m->wdec;
+        if (!c) continue;
+        for (uint32_t i = 0; i < m->hdr->n_ops; i++)
+            if (c[i] && c[i] != (int8_t *)&C1_NO_BIAS) free(c[i]);
+        free(c);
+    }
+    m->wdec = m->wbias = NULL;
+    m->wdec_bytes = 0;
     if (m->wrows) {
         for (uint32_t i = 0; i < m->hdr->n_ops; i++) free(m->wrows[i]);
         free(m->wrows);
@@ -366,6 +429,17 @@ const int8_t *mmrt_run(mmrt_model_t *m, const int8_t *input, int T_in, int *T_ou
             if (!mmrt_use_ref)
                 mmrt_s3_conv1x1(x, Tx, Cx, w, op->wfmt, b, Cy, op->stride, op->shift, op->relu, y, Ty);
             else
+#endif
+#ifdef MMRT_C1
+            // the P4's group kernel on the packed layout (every sum in this model fits its 20-bit
+            // lanes, as the S3's kernels assume)
+            const int8_t *wc = NULL, *bias_blks = NULL;
+            if (!mmrt_use_ref && Cx % 16 == 0 && Cy % 16 == 0 && !((uintptr_t)x & 15) && !((uintptr_t)y & 15)
+                && op->shift >= 0 && op->shift <= 13 && SIMD_REACH(x) && SIMD_REACH(y) && C1_READY()
+                && op_c1(m, i, w, op->wfmt, Cx, Cy, b, &wc, &bias_blks)) {
+                mmrt_conv1x1_c1(x, Cx, wc, bias_blks, Cy, op->stride, op->shift, op->relu, y, Ty);
+                break;
+            }
 #endif
 #ifdef MMRT_ROWDOT
             // a vector dot product (the P4's): each output's weights as one contiguous row

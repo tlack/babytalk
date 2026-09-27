@@ -60,8 +60,8 @@ these differences:
    RAM goes to the recognizer's activations instead. Also set `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`
    (sanoTTS's static buffers) and `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`.
 5. `atomvm_mmrt` (the `mmrt` module: matvec, matmul... over binaries) works on the P4 too, on
-   its vector unit: 256x256 int8 matvec 243 MMAC/s, matmul with 16 rows 1070 MMAC/s (the S3:
-   145 and 720). `apps/mmrt_test` passes all 26 test vectors.
+   its vector unit: 256x256 int8 matvec 267 MMAC/s, matmul with 16 rows 1640 MMAC/s, int4 564
+   MMAC/s (the S3: 145, 720 and 466). `apps/mmrt_test` passes all 26 test vectors.
 6. The P4's bootloader goes at **0x2000** (the S3's at 0x0). With 32 MB of flash, use the S3
    layout or a bigger one; the model partition is found by name (`model`).
 
@@ -69,14 +69,15 @@ these differences:
 
 | task | ESP32-P4 | ESP32-S3 (for comparison) |
 |---|---|---|
-| transcribe 2 s | **0.87 s** (the first run: +~1 s, see below) | 0.53 s |
-| transcribe 4 s | 1.56 s | ~0.85 s |
-| transcribe 8 s | 3.6 s | |
+| transcribe 1 s | 0.44 s | 0.35 s |
+| transcribe 2 s | **0.58 s** (the first run after a boot: 0.98 s) | 0.53 s |
+| transcribe 4 s | 1.02 s | ~0.85 s |
+| transcribe 8 s | 2.6 s | |
 | speak 5.4 s of speech | 3.8 s (0.71 x real time) | 0.27 x real time |
 
 - Transcription on the P4 uses both cores and its vector unit (`mmrt/README.md`, "Other chips:
-  the ESP32-P4"). The first transcription after a boot also unpacks and rearranges the 1x1
-  weights (9.8 MB, kept in PSRAM for later runs).
+  the ESP32-P4"). The first transcription after a boot also decodes the int4 weights (9.8 MB,
+  kept in PSRAM for later runs).
 - Speech synthesis runs on sanoTTS's portable scalar kernels: its vector kernels are S3-only.
 - Memory: 295 KB of internal RAM free at boot, ~227 KB with WiFi and TLS up. PSRAM: 24 MB free
   once the model's rows are unpacked.
@@ -106,6 +107,10 @@ S3's (`ee.`), but not exactly. Each of these cost a debugging round:
   from memory instead.
 - **Only some registers** work as vector-instruction operands: `t0`-`t2` and `a6`/`a7` are
   rejected (x8-x15 and x28-x31 have worked). Assemble a probe before designing around one.
+- **`esp.vld.l.64` ignores misalignment silently**: from an address that isn't 8-byte aligned
+  it loads the wrong bytes, with no fault. (The int4 decoder copies such rows to an aligned
+  buffer first; a test vector with an odd-aligned matrix caught it, the self-check didn't, so
+  the self-check now tries unaligned sources too.)
 - **The vector unit can't read the P4's low-power RTC RAM**, which ESP-IDF adds to the
   internal heap (a load access fault). Ask for `MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA`, which
   leaves it out.

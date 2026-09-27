@@ -91,13 +91,16 @@ mmrt_p4_dw_row:
 //
 // One 16-output group of a 1x1 conv / matmul over T frames, straight from MMRT's packed layout
 // (the S3's mmrt_s3_conv1x1_row, one group): per frame, 16 inputs at a time, each one's 16
-// weights times it in one esp.vsmulas.s8.qacc (vector x one lane of q0) -- no repacking.
-//   x: T rows of C int8, 16-byte aligned, C a multiple of 16
+// weights times it in one esp.vsmulas.s8.qacc (vector x one lane of q0), which also loads the
+// weights two steps ahead -- one instruction per 16 multiply-adds, no repacking.
+//   x: T rows of C int8, 16-byte aligned, C a multiple of 16; row t at x + t * (C + x_skip)
 //   w: [C][16] int8, 16-byte aligned
 //   y: T rows of 16, y_stride bytes apart, 16-byte aligned
-//   a: T, C, y_stride, shift (0..13), relu, then at +32 and +48 the rounding term's factors
-//      (as mmrt_p4_dw_row)
-// The accumulator lanes are 20 bits: the caller makes sure |x . w| < 2^19.
+//   a: +0 T, +4 C, +8 y_stride, +12 shift (0..13), +16 relu, +20 x_skip (bytes between one
+//      frame's inputs and the next's: (stride - 1) * C), +24 bias (NULL, or 16 x 16 int8 that
+//      the constants x_bias turn into each lane's bias: one more 16-input chunk), then at +32
+//      and +48 the rounding term's factors (as mmrt_p4_dw_row), at +64 x_bias
+// The accumulator lanes are 20 bits: the caller makes sure every sum stays under 2^19.
     .text
     .align  4
     .global mmrt_p4_c1_group
@@ -108,6 +111,8 @@ mmrt_p4_c1_group:
     lw      a6, 8(a3)               // y_stride
     lw      t4, 12(a3)              // shift (the PIE operands take only some registers: a7 isn't one)
     lw      t1, 16(a3)              // relu
+    lw      a7, 20(a3)              // x_skip
+    lw      t2, 24(a3)              // bias block, or NULL
     addi    t6, a3, 32
     esp.vld.128.ip  q5, t6, 16      // rnd_a
     esp.vld.128.ip  q4, t6, 16      // rnd_b (lane 0)
@@ -117,43 +122,88 @@ mmrt_p4_c1_group:
 .Lc1_frame:
     mv      t5, a2                  // w, from the start for every frame
     esp.zero.qacc
-    mv      t0, t3
+    esp.vld.128.ip  q0, a1, 16      // x[0 .. 16)
+    esp.vld.128.ip  q1, t5, 16      // w[0]
+    esp.vld.128.ip  q2, t5, 16      // w[1]
+    // (the S3's loop: each multiply loads the weights two steps ahead, alternating q1 and q2;
+    // the last chunk is peeled so nothing is read past the group's weights)
+    addi    t0, t3, -1              // chunks before the last
+    beqz    t0, .Lc1_last
 .Lc1_chunk:
-    esp.vld.128.ip      q0, a1, 16      // x[c .. c + 16)
-    esp.vld.128.ip      q1, t5, 16      // w[c + 0]
-    esp.vsmulas.s8.qacc q1, q0, 0       // QACC[i] += x[c + 0] * w[c + 0][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 1]
-    esp.vsmulas.s8.qacc q1, q0, 1       // QACC[i] += x[c + 1] * w[c + 1][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 2]
-    esp.vsmulas.s8.qacc q1, q0, 2       // QACC[i] += x[c + 2] * w[c + 2][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 3]
-    esp.vsmulas.s8.qacc q1, q0, 3       // QACC[i] += x[c + 3] * w[c + 3][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 4]
-    esp.vsmulas.s8.qacc q1, q0, 4       // QACC[i] += x[c + 4] * w[c + 4][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 5]
-    esp.vsmulas.s8.qacc q1, q0, 5       // QACC[i] += x[c + 5] * w[c + 5][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 6]
-    esp.vsmulas.s8.qacc q1, q0, 6       // QACC[i] += x[c + 6] * w[c + 6][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 7]
-    esp.vsmulas.s8.qacc q1, q0, 7       // QACC[i] += x[c + 7] * w[c + 7][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 8]
-    esp.vsmulas.s8.qacc q1, q0, 8       // QACC[i] += x[c + 8] * w[c + 8][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 9]
-    esp.vsmulas.s8.qacc q1, q0, 9       // QACC[i] += x[c + 9] * w[c + 9][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 10]
-    esp.vsmulas.s8.qacc q1, q0, 10       // QACC[i] += x[c + 10] * w[c + 10][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 11]
-    esp.vsmulas.s8.qacc q1, q0, 11       // QACC[i] += x[c + 11] * w[c + 11][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 12]
-    esp.vsmulas.s8.qacc q1, q0, 12       // QACC[i] += x[c + 12] * w[c + 12][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 13]
-    esp.vsmulas.s8.qacc q1, q0, 13       // QACC[i] += x[c + 13] * w[c + 13][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 14]
-    esp.vsmulas.s8.qacc q1, q0, 14       // QACC[i] += x[c + 14] * w[c + 14][i]
-    esp.vld.128.ip      q1, t5, 16      // w[c + 15]
-    esp.vsmulas.s8.qacc q1, q0, 15       // QACC[i] += x[c + 15] * w[c + 15][i]
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 0
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 1
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 2
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 3
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 4
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 5
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 6
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 7
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 8
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 9
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 10
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 11
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 12
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 13
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 14  // (loads the next chunk's w[0])
+    esp.vsmulas.s8.qacc.ld.incp q0, a1, q2, q0, 15  // (loads the next chunk's x)
+    esp.vld.128.ip  q2, t5, 16                      // the next chunk's w[1]
     addi    t0, t0, -1
     bnez    t0, .Lc1_chunk
+.Lc1_last:
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 0
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 1
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 2
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 3
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 4
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 5
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 6
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 7
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 8
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 9
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 10
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 11
+    esp.vsmulas.s8.qacc.ld.incp q1, t5, q1, q0, 12
+    esp.vsmulas.s8.qacc.ld.incp q2, t5, q2, q0, 13
+    esp.vsmulas.s8.qacc q1, q0, 14
+    esp.vsmulas.s8.qacc q2, q0, 15
+    add     a1, a1, a7              // (a strided conv skips frames)
+    beqz    t2, .Lc1_biased
+    mv      t5, t2                  // the bias: x_bias[k] * block[k][i], k < 16
+    addi    t6, a3, 64
+    esp.vld.128.ip  q0, t6, 16      // q0 = x_bias
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 0
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 1
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 2
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 3
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 4
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 5
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 6
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 7
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 8
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 9
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 10
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 11
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 12
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 13
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 14
+    esp.vld.128.ip      q1, t5, 16
+    esp.vsmulas.s8.qacc q1, q0, 15
+.Lc1_biased:
     beqz    t4, .Lc1_shifted
     esp.vsmulas.s8.qacc q5, q4, 0   // + 2^(shift - 1)
 .Lc1_shifted:
@@ -167,3 +217,122 @@ mmrt_p4_c1_group:
     bnez    a4, .Lc1_frame
     ret
     .size   mmrt_p4_c1_group, . - mmrt_p4_c1_group
+
+// void mmrt_p4_cb4_rows(int8_t *dst, const uint8_t *idx, const int8_t *levels, int C)
+//
+// A CB4 weight group's index rows -> [C][16] int8 (mmrt.h: row c is 8 index bytes, lane 2j the
+// low nibble of byte j and lane 2j + 1 the high one; each lane has its own 16-entry table).
+// There's no gather, so per row: the 16 lane indices unpacked (a nibble mask, an arithmetic
+// shift by 4, then esp.vzip.8 interleaves low and high), and for each of the 16 levels the
+// lanes holding it take that level's values: compare, AND, OR.
+//   levels: [16 levels][16 lanes] int8 (the group's table transposed), 16-byte aligned
+//   dst 16-byte aligned; idx any alignment
+    .section .rodata
+    .align  4
+mmrt_p4_nibble_mask:
+    .byte 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15
+    .text
+    .align  4
+    .global mmrt_p4_cb4_rows
+    .type   mmrt_p4_cb4_rows, @function
+mmrt_p4_cb4_rows:
+    la      t6, mmrt_p4_nibble_mask
+    esp.vld.128.ip  q6, t6, 16      // 0x0F in every lane
+    li      a5, 4
+    esp.movx.w.sar  a5              // shifts by 4
+    li      a4, 1
+.Lcb4_row:
+    esp.zero.q      q0
+    esp.vld.l.64.ip q0, a1, 8       // this row's 8 index bytes (the high half stays 0)
+    esp.andq        q1, q0, q6      // low nibbles
+    esp.vsr.s32     q2, q0          // >> 4 (the byte above's bits land in the masked-off half)
+    esp.andq        q2, q2, q6      // high nibbles
+    esp.vzip.8      q1, q2          // q1: lo0 hi0 lo1 hi1 ... lo7 hi7 -- lane i's index
+    esp.zero.q      q3              // the row
+    esp.zero.q      q4              // the level compared against
+    mv      t3, a2
+    esp.vld.128.ip      q5, t3, 16      // level 0's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 0
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 1's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 1
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 2's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 2
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 3's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 3
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 4's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 4
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 5's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 5
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 6's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 6
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 7's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 7
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 8's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 8
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 9's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 9
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 10's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 10
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 11's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 11
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 12's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 12
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 13's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 13
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 14's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 14
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vld.128.ip      q5, t3, 16      // level 15's value for each lane
+    esp.vcmp.eq.u8      q2, q1, q4      // lanes whose index is 15
+    esp.andq            q2, q2, q5
+    esp.orq             q3, q3, q2
+    esp.vsadds.s8       q4, q4, a4      // next level
+    esp.vst.128.ip  q3, a0, 16
+    addi    a3, a3, -1
+    bnez    a3, .Lcb4_row
+    ret
+    .size   mmrt_p4_cb4_rows, . - mmrt_p4_cb4_rows

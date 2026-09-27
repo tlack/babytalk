@@ -154,19 +154,26 @@ the packed weights, and zero inputs (after a ReLU, most of them) skipped.
 The **ESP32-P4** has a vector unit of its own (the `Xesppie` RISC-V extension, 128-bit
 registers). MMRT uses it as follows (`MMRT_P4`, set by `components/mmrt` for `esp32p4`):
 
-- **1x1 convolutions as row dot products.** Each output's weights are unpacked and rearranged
-  into one contiguous row, once per boot, and kept in PSRAM (9.8 MB for Citrinet-256). Each
-  output is then a dot product of 16 int8s per `esp.vmulas.s8.xacc`, into a 40-bit
-  accumulator. The frames go 32 at a time, so a tile and a row of weights meet in cache, and
-  the two cores take half the frames each.
+- **1x1 convolutions a 16-output group at a time**, straight from the packed layout: each input
+  times its 16 weights in one `esp.vsmulas.s8.qacc`, which also loads the weights two steps
+  ahead (the S3's loop). The bias rides along as one more 16-input chunk: constant inputs
+  {1, 64, 64, ...} and a block of weights that sum to it exactly (any bias up to ~122,000). The
+  frames go 32 at a time, so a tile stays in cache while every group meets it, and the two
+  cores take half the frames each. int4 layers are decoded once and kept in PSRAM.
+- **int4 decoding** on the vector unit: there's no gather, so per row the 16 lane indices are
+  unpacked (mask, shift, `esp.vzip.8`) and each of the 16 codebook levels is compared against
+  every lane at once (`esp.vcmp.eq.u8`, AND, OR).
+- **Row dot products** (`esp.vmulas.s8.xacc`, a 40-bit accumulator) for anything the group
+  kernel can't take: a bias too large, a shift over 13, or the `mmrt` NIFs' exact int32 results.
 - **Depthwise convolutions** on `esp.vmulas.s8.qacc`, 16 channels per instruction: the S3's
   kernel, ported.
 - Each vector kernel **checks itself** against the portable one on a test layer before its
   first use, and stays unused if they differ.
 - Activations go to **internal RAM** when they fit (`components/stt_engine`).
 
-The host checker runs the P4's path with its dot products in C
-(`MMRT_CFLAGS=-DMMRT_ROWDOT uv run export/mmrt_check_model.py`): the whole model is bit-exact.
+The host checker runs the P4's paths in C: `MMRT_CFLAGS="-DMMRT_C1 -DMMRT_ROWDOT" uv run
+export/mmrt_check_model.py` (the group kernel's arithmetic, biases and tiling included: 164 of
+Citrinet-256's 165 1x1 layers take it) is bit-exact on the whole model.
 
 **Speed history on the P4** (transcribing 2 s of speech, int4 model, bit-exact at every step):
 
@@ -179,8 +186,14 @@ The host checker runs the P4's path with its dot products in C
 | + 1x1 on both cores | 0.91 s | |
 | + activations in internal RAM | 0.83 s | 30 s |
 | + frames in tiles of 32 | 0.87 s | 3.6 s |
+| + 1x1 on the 16-lane group kernel, bias as a chunk | 0.65 s | 2.8 s |
+| + int4 decoded on the vector unit (the first run: 1.2 s -> 1.06 s) | 0.65 s | 2.7 s |
+| + the S3's fused load-and-multiply loop | **0.58 s** | **2.6 s** |
 
-The S3 does 2 s in 0.53 s. What separates them: the S3's kernels stream weights through
-SRAM on the other core, fuse depthwise into 1x1 and use its 16-lane accumulator for the 1x1
-too. Those are the next steps for the P4. The P4's own quirks (saturation, its zero-overhead
+The S3 does 2 s in 0.53 s. What's still scalar on the P4: the block tails (scale, residual
+add, ReLU: ~70 ms of a 2 s clip), which the S3 fuses into one vector pass, and the depthwise ->
+1x1 fusion the S3 uses on short clips.
+
+**The `mmrt` NIFs on the P4** (256x256, the same kernels): int8 matvec 267 MMAC/s, matmul with
+16 rows 1640 MMAC/s, int4 564 MMAC/s. The S3: 145, 720 and 466. The P4's own quirks (saturation, its zero-overhead
 loop, registers, RTC RAM) are in `docs/BOARD_WAVESHARE_P4_WIFI6.md`.

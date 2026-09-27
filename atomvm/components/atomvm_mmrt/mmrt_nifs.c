@@ -42,8 +42,8 @@
 // in mmrt_s3.S: one CB4 group's index rows -> int8 (dst, idx 4-byte aligned)
 void mmrt_s3_cb4_rows(int8_t *dst, const uint8_t *idx, const uint32_t *tab32, int C);
 #endif
-#ifdef MMRT_P4
-#include "mmrt_port.h"  // mmrt_dot_s8: the P4's vector dot product (mmrt_p4.S)
+#ifndef MMRT_S3
+#include "mmrt_port.h"  // the portable CB4 decoder; on the P4 its vector kernels (mmrt_p4.S)
 #endif
 
 #define MMRT_SYNC_MAX_MACS (4 * 1024 * 1024)  // ~2 ms on PIE, ~30 ms on the C path
@@ -176,8 +176,9 @@ static void *scratch(size_t bytes, bool prefer_internal)
     return p;
 }
 
-// One 16-row group of a packed matrix as [cpad][16] int8 in dst (16-aligned). tab32: 1 KB
-// scratch for the CB4 decoder (the scheduler stacks are 3.5 KB).
+// One 16-row group of a packed matrix as [cpad][16] int8 in dst (16-aligned). tab32: scratch
+// for the CB4 decoder: 1 KB on the S3, MMRT_CB4_SCRATCH (4 KB) elsewhere, from the heap (the
+// scheduler stacks are 3.5 KB).
 static void load_group(const mat_t *m, int g, int8_t *dst, uint32_t *tab32)
 {
     const uint8_t *src = m->p + (size_t) g * m->gbytes;
@@ -193,7 +194,8 @@ static void load_group(const mat_t *m, int g, int8_t *dst, uint32_t *tab32)
         return;
     }
 #else
-    (void) tab32;
+    mmrt_cb4_group_port(dst, src, m->cpad, (uint16_t *) tab32);  // tab32: MMRT_CB4_SCRATCH bytes here
+    return;
 #endif
     for (int c = 0; c < m->cpad; c++, idx += 8, dst += 16) {  // portable decode (any alignment)
         for (int j = 0; j < 8; j++) {
@@ -327,7 +329,11 @@ static term do_matmul(Context *ctx, term mt, term xt, bool to_int32, avm_int_t s
     const size_t xb = (size_t) T * m.cpad, wb = (size_t) m.cpad * 16;
     const size_t yb = to_int32 ? (size_t) m.rows * 4 : (size_t) T * (pie ? m.npad : m.rows);
     int8_t *xs = scratch(xb, true), *ws = scratch(wb, true), *ys = scratch(yb, false);
+#ifdef MMRT_S3
     uint32_t *tab = m.fmt == M_CB4 ? malloc(1024) : NULL;
+#else
+    uint32_t *tab = m.fmt == M_CB4 ? malloc(MMRT_CB4_SCRATCH) : NULL;  // the pair tables (load_group)
+#endif
     if (!xs || !ws || !ys || (m.fmt == M_CB4 && !tab)) {
         heap_caps_free(xs);
         heap_caps_free(ws);
@@ -347,7 +353,7 @@ static term do_matmul(Context *ctx, term mt, term xt, bool to_int32, avm_int_t s
 #if defined(MMRT_S3)
             mmrt_s3_matmul_group(xs, T, m.cpad, ws, (int) shift, 0, ys + g * 16, m.npad);
 #elif defined(MMRT_P4)
-            mmrt_p4_matmul_group(xs, T, m.cpad, ws, (int) shift, 0, ys + g * 16, m.npad);
+            mmrt_c1_matmul_group(xs, T, m.cpad, ws, (int) shift, 0, ys + g * 16, m.npad);
 #endif
             continue;
         }

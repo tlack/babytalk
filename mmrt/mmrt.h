@@ -87,6 +87,8 @@ typedef struct {
     size_t wcache_bytes;
     int8_t **wrows;           // per 1x1 op: its weights as rows (MMRT_ROWDOT: made on first use, kept)
     size_t wrows_bytes;
+    int8_t **wdec, **wbias;   // per 1x1 op (MMRT_C1): int4 weights decoded, bias as weight blocks (kept)
+    size_t wdec_bytes;
 } mmrt_model_t;
 
 // Allocator hooks: activations can be large (PSRAM on the S3).

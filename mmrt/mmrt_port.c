@@ -1,6 +1,7 @@
 #include "mmrt_port.h"
 
 #include <stddef.h>
+#include <string.h>
 
 // the reference's output rounding: v * 2^-shift rounded half up, ReLU, saturated to int8
 static inline int8_t out8(int32_t acc, int shift, int relu)
@@ -48,6 +49,73 @@ void mmrt_conv1x1_port(const int8_t *x, int T_in, int C, const int8_t *w, const 
             int8_t *yt = y + (size_t)t * N + g * 16;
             for (int j = 0; j < 16; j++) yt[j] = out8(acc[j], shift, relu);
         }
+    }
+}
+
+#ifdef MMRT_P4
+static int cb4_p4_ok(void);
+void mmrt_p4_cb4_rows(int8_t *dst, const uint8_t *idx, const int8_t *levels, int C);
+
+// the P4's vector decoder (mmrt_p4.S): the table transposed to [level][lane] first. Its 64-bit
+// loads need the index rows 8-byte aligned (unaligned, they silently read the wrong bytes):
+// otherwise they're copied, 64 rows at a time.
+static void cb4_group_p4(int8_t *dst, const uint8_t *src, int C)
+{
+    int8_t levels[256] __attribute__((aligned(16)));
+    for (int k = 0; k < 16; k++)
+        for (int i = 0; i < 16; i++) levels[k * 16 + i] = (int8_t)src[i * 16 + k];
+    const uint8_t *idx = src + 256;
+    if (!((uintptr_t)idx & 7)) {
+        mmrt_p4_cb4_rows(dst, idx, levels, C);
+        return;
+    }
+    uint8_t rows[64 * 8] __attribute__((aligned(16)));
+    for (int c = 0; c < C; c += 64) {
+        const int n = C - c < 64 ? C - c : 64;
+        memcpy(rows, idx + (size_t)c * 8, (size_t)n * 8);
+        mmrt_p4_cb4_rows(dst + (size_t)c * 16, rows, levels, n);
+    }
+}
+#endif
+
+void mmrt_cb4_group_port(int8_t *dst, const uint8_t *src, int C, uint16_t *pt)
+{
+#ifdef MMRT_P4
+    if (C > 0 && !((uintptr_t)dst & 15) && cb4_p4_ok()) {
+        cb4_group_p4(dst, src, C);
+        return;
+    }
+#endif
+    const uint8_t *idx = src + 256;
+    if (!pt || C < 1024) {            // look each weight up in its lane's table: a row of 16 built
+        uint8_t tab[256];             // in registers, stored as four words (tables cost more than
+        memcpy(tab, src, 256);        // they save below ~1024 inputs: measured on the P4)
+        for (int c = 0; c < C; c++, idx += 8, dst += 16) {
+            uint32_t row[4];
+            for (int q = 0; q < 4; q++) {
+                const uint8_t b0 = idx[2 * q], b1 = idx[2 * q + 1];
+                const uint8_t *t = tab + q * 64;   // lanes 4q .. 4q + 3
+                row[q] = (uint32_t)t[b0 & 15] | (uint32_t)t[16 + (b0 >> 4)] << 8
+                         | (uint32_t)t[32 + (b1 & 15)] << 16 | (uint32_t)t[48 + (b1 >> 4)] << 24;
+            }
+            memcpy(dst, row, 16);
+        }
+        return;
+    }
+    for (int j = 0; j < 8; j++) {     // lanes 2j (low nibble) and 2j + 1 (high): every index byte
+        const uint8_t *lo = src + (2 * j) * 16, *hi = src + (2 * j + 1) * 16;
+        uint16_t *t = pt + j * 256;
+        for (int h = 0; h < 16; h++)
+            for (int l = 0; l < 16; l++) t[h * 16 + l] = (uint16_t)(lo[l] | (hi[h] << 8));
+    }
+    for (int c = 0; c < C; c++, idx += 8, dst += 16) {
+        uint8_t pair[16];
+        for (int j = 0; j < 8; j++) {
+            const uint16_t v = pt[j * 256 + idx[j]];
+            pair[2 * j] = (uint8_t)v;
+            pair[2 * j + 1] = (uint8_t)(v >> 8);
+        }
+        memcpy(dst, pair, 16);
     }
 }
 
@@ -256,48 +324,162 @@ int mmrt_dwconv_p4(const int8_t *x, int T_in, int C, const int8_t *w, int K, int
 }
 #endif
 
-#ifdef MMRT_P4
-// ---- one 16-output group of a 1x1 conv / matmul on the P4's vector unit, from the packed
-// [C][16] layout (mmrt_p4_c1_group), checked once against exact integer arithmetic
+#if defined(MMRT_P4) || defined(MMRT_C1)
+// ---- 1x1 convs / matmuls one 16-output group at a time, from the packed [C][16] layout: on the
+// P4 its vector unit (mmrt_p4_c1_group: 16 weights times one input per instruction, into 20-bit
+// accumulator lanes), elsewhere (MMRT_C1: the PC checker) the same arithmetic in C. A bias rides
+// as one more 16-input chunk: constant inputs X_BIAS = {1, 64 x 15} and a block of weights
+// (mmrt_c1_bias_block) that they turn into each lane's bias, exactly.
 
-typedef struct {
-    int T, C, y_stride, shift, relu, pad_[3];
-    int8_t rnd_a[16], rnd_b[16];
-} __attribute__((aligned(16))) mmrt_p4_c1_t;
-void mmrt_p4_c1_group(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_p4_c1_t *a);
+static const int8_t X_BIAS[16] = {1, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64};
 
-void mmrt_p4_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride)
+int mmrt_c1_bias_block(int8_t blk[256], const int32_t *bias)
 {
-    mmrt_p4_c1_t a = {T, C, y_stride, shift, relu, {0, 0, 0}, {0}, {0}};
-    rnd_factors(a.rnd_a, a.rnd_b, shift);
-    mmrt_p4_c1_group(y, x, w, &a);
+    memset(blk, 0, 256);
+    for (int i = 0; i < 16; i++) {
+        const int32_t b = bias[i], w0 = ((b % 64) + 64) % 64;   // bias = w0 + 64 * rest
+        int32_t rest = (b - w0) / 64;
+        blk[i] = (int8_t)w0;
+        for (int k = 1; k < 16 && rest; k++) {
+            const int32_t d = rest > 127 ? 127 : (rest < -127 ? -127 : rest);
+            blk[k * 16 + i] = (int8_t)d;
+            rest -= d;
+        }
+        if (rest) return -1;                                     // |bias| over 64 * 15 * 127
+    }
+    return 0;
 }
 
+#ifdef MMRT_P4
+typedef struct {
+    int T, C, y_stride, shift, relu, x_skip;
+    const int8_t *bias;
+    int pad_;
+    int8_t rnd_a[16], rnd_b[16], x_bias[16];
+} __attribute__((aligned(16))) mmrt_p4_c1_t;
+void mmrt_p4_c1_group(int8_t *y, const int8_t *x, const int8_t *w, const mmrt_p4_c1_t *a);
+#endif
+
+// one group over T frames: y[t][i] (rows y_stride apart) from x rows C + x_skip apart
+static void c1_group(int8_t *y, const int8_t *x, const int8_t *w, const int8_t *bias_blk, int T, int C,
+                     int x_skip, int y_stride, int shift, int relu)
+{
+#ifdef MMRT_P4
+    mmrt_p4_c1_t a = {T, C, y_stride, shift, relu, x_skip, bias_blk, 0, {0}, {0}, {0}};
+    rnd_factors(a.rnd_a, a.rnd_b, shift);
+    memcpy(a.x_bias, X_BIAS, 16);
+    mmrt_p4_c1_group(y, x, w, &a);
+#else
+    for (int t = 0; t < T; t++, x += C + x_skip, y += y_stride)
+        for (int i = 0; i < 16; i++) {
+            int32_t acc = 0;
+            for (int c = 0; c < C; c++) acc += x[c] * w[c * 16 + i];
+            if (bias_blk)
+                for (int k = 0; k < 16; k++) acc += X_BIAS[k] * bias_blk[k * 16 + i];
+            y[i] = out8(acc, shift, relu);
+        }
+#endif
+}
+
+void mmrt_c1_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride)
+{
+    c1_group(y, x, w, NULL, T, C, 0, y_stride, shift, relu);
+}
+
+typedef struct {
+    const int8_t *x, *w, *bias_blks;
+    int8_t *y;
+    int C, N, stride, shift, relu;
+} c1_conv_t;
+
+// frames [t0, t1), in tiles of TILE_T frames (a tile's inputs stay in cache while every group
+// of weights meets them)
+static void c1_frames(void *arg, int t0, int t1)
+{
+    const c1_conv_t *j = (const c1_conv_t *)arg;
+    for (int tb = t0; tb < t1; tb += TILE_T) {
+        const int n = tb + TILE_T < t1 ? TILE_T : t1 - tb;
+        for (int g = 0; g < j->N / 16; g++)
+            c1_group(j->y + (size_t)tb * j->N + g * 16, j->x + (size_t)tb * j->stride * j->C,
+                     j->w + (size_t)g * j->C * 16, j->bias_blks ? j->bias_blks + g * 256 : NULL, n, j->C,
+                     (j->stride - 1) * j->C, j->N, j->shift, j->relu);
+    }
+}
+
+void mmrt_conv1x1_c1(const int8_t *x, int C, const int8_t *w, const int8_t *bias_blks, int N, int stride,
+                     int shift, int relu, int8_t *y, int T_out)
+{
+    c1_conv_t j = {x, w, bias_blks, y, C, N, stride, shift, relu};
+#ifdef MMRT_P4
+    split_frames(c1_frames, &j, T_out);
+#else
+    c1_frames(&j, 0, T_out);
+#endif
+}
+#endif
+
+#ifdef MMRT_P4
+// the group kernel against the same arithmetic in C, once: biases, strides, every shift
 static int s_c1_ok = -1;
 
 int mmrt_p4_matmul_ok(void)
 {
     if (s_c1_ok >= 0) return s_c1_ok;
-    enum { T = 5, C = 64 };
-    static int8_t x[T * C] __attribute__((aligned(16))), w[C * 16] __attribute__((aligned(16))),
-        y[T * 32] __attribute__((aligned(16)));
+    enum { T = 5, C = 64, STRIDE = 2 };
+    static int8_t x[T * STRIDE * C] __attribute__((aligned(16))), w[C * 16] __attribute__((aligned(16))),
+        blk[256] __attribute__((aligned(16))), y[T * 32] __attribute__((aligned(16)));
     uint32_t r = 4242;
     for (int trial = 0; trial < 28; trial++) {
-        const int range = trial < 14 ? 16 : 60, shift = trial % 14, relu = trial & 1;  // |acc| < 64*60*60 < 2^19
-        for (int i = 0; i < T * C; i++) x[i] = (int8_t)((int)((r = r * 1103515245 + 12345) >> 16) % range);
+        const int range = trial < 14 ? 16 : 45, shift = trial % 14, relu = trial & 1, with_bias = trial % 3 != 0,
+                  stride = 1 + (trial & 2) / 2;   // |sum| < 64 * 45 * 45 + 2^16 < 2^19
+        int32_t bias[16];
+        for (int i = 0; i < T * STRIDE * C; i++) x[i] = (int8_t)((int)((r = r * 1103515245 + 12345) >> 16) % range);
         for (int i = 0; i < C * 16; i++) w[i] = (int8_t)((int)((r = r * 1103515245 + 12345) >> 16) % range);
-        mmrt_p4_matmul_group(x, T, C, w, shift, relu, y, 32);
+        for (int i = 0; i < 16; i++) bias[i] = (int32_t)((r = r * 1103515245 + 12345) >> 15) % 65536 - 32768;
+        if (mmrt_c1_bias_block(blk, bias)) return s_c1_ok = 0;
+        c1_group(y, x, w, with_bias ? blk : NULL, T, C, (stride - 1) * C, 32, shift, relu);
         for (int t = 0; t < T; t++)
             for (int i = 0; i < 16; i++) {
-                int32_t acc = 0;
-                for (int c = 0; c < C; c++) acc += x[t * C + c] * w[c * 16 + i];
+                int32_t acc = with_bias ? bias[i] : 0;
+                for (int c = 0; c < C; c++) acc += x[t * stride * C + c] * w[c * 16 + i];
                 const int8_t want = out8(acc, shift, relu);
                 if (y[t * 32 + i] != want) {
-                    printf("mmrt: the P4 matmul kernel differs (shift %d: %d, not %d): not used\n", shift, y[t * 32 + i], want);
+                    printf("mmrt: the P4 1x1 kernel differs (shift %d, bias %d, stride %d: %d, not %d): not used\n",
+                           shift, with_bias, stride, y[t * 32 + i], want);
                     return s_c1_ok = 0;
                 }
             }
     }
     return s_c1_ok = 1;
+}
+#endif
+
+#ifdef MMRT_P4
+// the vector CB4 decoder against the table lookup, once
+static int cb4_p4_ok(void)
+{
+    static int ok = -1;
+    if (ok >= 0) return ok;
+    enum { C = 80 };   // more than one 64-row chunk
+    static uint8_t buf[256 + C * 8 + 8] __attribute__((aligned(16)));
+    static int8_t want[C * 16] __attribute__((aligned(16))), got[C * 16] __attribute__((aligned(16)));
+    uint32_t r = 99;
+    for (int off = 0; off < 4; off++) {       // the source aligned, and not (0, 1, 3, 5 bytes off)
+        const uint8_t *src = buf + (off ? 2 * off - 1 : 0);
+        for (int i = 0; i < (int)sizeof(buf); i++) buf[i] = (uint8_t)((r = r * 1103515245 + 12345) >> 16);
+        for (int c = 0; c < C; c++)
+            for (int j = 0; j < 8; j++) {
+                const uint8_t b = src[256 + c * 8 + j];
+                want[c * 16 + 2 * j] = (int8_t)src[(2 * j) * 16 + (b & 15)];
+                want[c * 16 + 2 * j + 1] = (int8_t)src[(2 * j + 1) * 16 + (b >> 4)];
+            }
+        cb4_group_p4(got, src, C);
+        if (memcmp(want, got, sizeof(want))) {
+            printf("mmrt: the P4 int4 decoder differs (source %d bytes off: %d %d %d, not %d %d %d): not used\n",
+                   off ? 2 * off - 1 : 0, got[0], got[1], got[2], want[0], want[1], want[2]);
+            return ok = 0;
+        }
+    }
+    return ok = 1;
 }
 #endif

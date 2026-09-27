@@ -18,6 +18,12 @@ void mmrt_dwconv_port(const int8_t *x, int T_in, int C, const int8_t *w, int K, 
 void mmrt_conv1x1_port(const int8_t *x, int T_in, int C, const int8_t *w, const int32_t *bias, int N,
                        int stride, int shift, int relu, int8_t *y, int T_out);
 
+// One CB4 weight group (mmrt.h: 256-byte table, then C x 8 index bytes) -> [C][16] int8. With
+// scratch (MMRT_CB4_SCRATCH bytes, 2-byte aligned) and C >= 1024 it builds per-lane-pair tables
+// of every index byte's two weights first, then decodes a pair of weights per lookup.
+#define MMRT_CB4_SCRATCH (8 * 256 * 2)
+void mmrt_cb4_group_port(int8_t *dst, const uint8_t *src, int C, uint16_t *scratch);
+
 // The 1x1 conv as dot products over rows: the weights repacked [N][C] (each output's C weights
 // contiguous), so each output is one dot product of C int8s -- which a vector unit does 16 at a
 // time (the ESP32-P4's esp.vmulas.s8.xacc: mmrt_p4.S; plain C elsewhere). x's rows and w_nc must
@@ -36,12 +42,20 @@ int mmrt_dwconv_p4(const int8_t *x, int T_in, int C, const int8_t *w, int K, int
                    int relu, int8_t *y, int T_out);
 // 1 if the vector dot product matches C's on a range of lengths (checked once, before use)
 int mmrt_dot_p4_check(void);
-// One 16-output group over T frames from the packed [C][16] layout, rounded and saturated as
-// the reference (x, w, y 16-byte aligned; C a multiple of 16; 0 <= shift <= 13; |x . w| < 2^19:
-// the lanes are 20 bits). Use only when mmrt_p4_matmul_ok() (checked once against exact
-// integer arithmetic).
-void mmrt_p4_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride);
+// 1 if the P4's 1x1 group kernel matches the same arithmetic in C (checked once, before use)
 int mmrt_p4_matmul_ok(void);
+#endif
+
+#if defined(MMRT_P4) || defined(MMRT_C1)
+// 1x1 convs / matmuls a 16-output group at a time from the packed [C][16] layout (the P4's
+// vector unit; MMRT_C1 on the PC: the same arithmetic in C). x, w, y 16-byte aligned, C a
+// multiple of 16, 0 <= shift <= 13, and every sum under 2^19 (20-bit accumulator lanes).
+// A bias goes in as a block of 16 x 16 weights per group (mmrt_c1_bias_block: -1 if a bias is
+// too large for it, |bias| over ~122,000).
+int mmrt_c1_bias_block(int8_t blk[256], const int32_t *bias16);
+void mmrt_conv1x1_c1(const int8_t *x, int C, const int8_t *w, const int8_t *bias_blks, int N, int stride,
+                     int shift, int relu, int8_t *y, int T_out);
+void mmrt_c1_matmul_group(const int8_t *x, int T, int C, const int8_t *w, int shift, int relu, int8_t *y, int y_stride);
 #endif
 
 #ifdef __cplusplus

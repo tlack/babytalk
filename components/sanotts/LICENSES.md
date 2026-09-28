@@ -37,6 +37,15 @@ The intent upstream is plainly permissive for everything we use: no espeak-ng co
 compiled. But three files carry no licence of their own and fall outside the MIT file list,
 so on the letter of the repository they are GPL-3.0-or-later (so are four headers without one).
 
+## The heart voice (ESP32-P4)
+
+`prepare.sh ... heart` (or `heart4`) makes a voice from the checkout's `web/voices/heart/`
+(float32 weights, 2.27M parameters). sanoTTS's README lists only its runtime as MIT, so those
+weights are GPL-3.0-or-later by the repository default. They are not compiled into the app but
+flashed to their own partition (`voice.bin`); a device carrying them is in the same position as
+the firmware below. BabyTalk's own files for it (`snt_q4.*`, `snt_port_p4.c`, `snt_nano.patch`,
+`tools/sanotts_voice.py`) are MIT.
+
 ## What this means
 
 - **This repository (source)**: MIT, unaffected. Nothing from sanoTTS is committed here.

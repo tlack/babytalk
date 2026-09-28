@@ -1,0 +1,284 @@
+--- a/snt_nano.c	2026-09-27 20:15:21.817028278 -0400
++++ b/snt_nano.c	2026-09-27 20:26:47.325556084 -0400
+@@ -265,9 +265,17 @@
+ #define SNT_NANO_ACT_F32
+ #endif
+ typedef float nano_w_t;
++#elif defined(SNT_NANO_W_Q4)
++/* BabyTalk: NANO_WEIGHT_FORMAT 2, 4-bit rows with a float scale per 16 inputs (row layout
++ * in BabyTalk's snt_q4.h). Rows keep the int8 rows' size, so offsets, staging and row indexing are the
++ * int8 ones; activations are int8 as usual and the kernel returns float sums per row. */
++#if NANO_WEIGHT_FORMAT != 2
++#error "SNT_NANO_W_Q4 build against a header that is not NANO_WEIGHT_FORMAT 2"
++#endif
++typedef signed char nano_w_t;
+ #else
+ #if NANO_WEIGHT_FORMAT != 0
+-#error "int8 build against a float32 blob header (NANO_WEIGHT_FORMAT 1): define SNT_NANO_W_F32"
++#error "int8 build against a float32 or 4-bit blob header: define SNT_NANO_W_F32 or SNT_NANO_W_Q4"
+ #endif
+ typedef signed char nano_w_t;
+ #endif
+@@ -701,6 +709,12 @@
+         out[r] = acc;
+     }
+ }
++#elif defined(SNT_NANO_W_Q4)
++#include "snt_q4.h"
++typedef float nano_acc_t;
++typedef const signed char *nano_act_ptr;
++#define NANO_ACTBUF(S) ((S)->qbuf)
++#define nano_matvec snt_matvec_q4
+ #else
+ typedef int32_t nano_acc_t;
+ typedef const signed char *nano_act_ptr;
+@@ -1040,6 +1054,65 @@
+  * column t while pass 1 has already read ax as far as t+half, and pass 1 of
+  * the NEXT tile starts at t0+TL+half -- strictly ahead of anything written
+  * here. That is what makes the aliasing safe under tiling too. */
++#if defined(SNT_NANO_PW_BATCH) && SNT_NANO_PW_BATCH > 1 && !defined(SNT_NANO_ACT_F32)
++/* BabyTalk: the embedding for SNT_NANO_PW_BATCH columns per fetch of its weights (matvec_cols,
++ * defined with the trunk below); per column the same arithmetic as the one-column version. */
++static signed char g_eq[2][SNT_NANO_PW_BATCH][NANO_EMBED_N16] __attribute__((aligned(16)));
++static nano_acc_t g_eacc[2][SNT_NANO_PW_BATCH][DIM];
++static void matvec_cols(const signed char *act, int astride, int ncols, const nano_w_t *w,
++                        nano_acc_t *out, int ostride, int rows, int len);
++
++static void em_col_range(int lo, int hi, void *vc) {
++    EmCtx *c = (EmCtx *)vc;
++    NanoScratch *S = SCR();
++    int id = snt_scratch_id();
++    const int half = EK / 2;
++    float s_act[SNT_NANO_PW_BATCH];
++    for (int u0 = lo; u0 < hi; u0 += SNT_NANO_PW_BATCH) {
++        int nb = hi - u0 < SNT_NANO_PW_BATCH ? hi - u0 : SNT_NANO_PW_BATCH;
++        for (int b = 0; b < nb; b++) {
++            int t = c->a0 + u0 + b;
++            for (int k = 0; k < EK; k++) {
++                int idx = t + k - half;
++                if (idx >= 0 && idx < c->T) {
++                    const float *slot = c->mel + (size_t)(idx % EM_RING) * MELS;
++                    for (int i = 0; i < MELS; i++) S->gather[i * EK + k] = slot[i];
++                } else {
++                    for (int i = 0; i < MELS; i++) S->gather[i * EK + k] = 0.0f;
++                }
++            }
++            s_act[b] = quant_gather(S, MELS * EK, NANO_EMBED_N16);
++            memcpy(g_eq[id][b], S->qbuf, NANO_EMBED_N16);
++        }
++        matvec_cols(g_eq[id][0], NANO_EMBED_N16, nb, c->ew, g_eacc[id][0], DIM, DIM, NANO_EMBED_N16);
++        for (int b = 0; b < nb; b++) {
++            int t = c->a0 + u0 + b;
++            int xc = WCOL(c->xw, c->x0, t);
++            for (int o = 0; o < DIM; o++)
++                c->x[(size_t)o * c->xw + xc] = s_act[b] * c->es[o] * (float)g_eacc[id][b][o] + c->eb[o];
++
++            for (int i = 0; i < NANO_NOISE_CH; i++)
++                for (int k = 0; k < EK; k++) {
++                    int idx = t + k - half;
++                    S->gather[i * EK + k] = (idx >= 0 && idx < c->T)
++                        ? c->noise[(size_t)i * c->noisew
++                                   + WCOL(c->noisew, c->noise0, idx)] : 0.0f;
++                }
++            float s_n = quant_gather(S, NANO_NOISE_CH * EK, NANO_NOISE_N16);
++            nano_matvec(NANO_ACTBUF(S), c->nw, S->acc32, DIM, NANO_NOISE_N16);
++            for (int o = 0; o < DIM; o++)
++                c->x[(size_t)o * c->xw + xc] += s_n * c->ns[o] * (float)S->acc32[o] + c->nb[o];
++
++            {   /* stem norm (LayerNorm or DyT), folded in */
++                float col[DIM], outc[DIM];
++                for (int ch = 0; ch < DIM; ch++) col[ch] = c->x[(size_t)ch * c->xw + xc];
++                NORM_COL(outc, col, c->ga, c->gw, c->gb, DIM);
++                for (int ch = 0; ch < DIM; ch++) c->x[(size_t)ch * c->xw + xc] = outc[ch];
++            }
++        }
++    }
++}
++#else
+ static void em_col_range(int lo, int hi, void *vc) {
+     EmCtx *c = (EmCtx *)vc;
+     NanoScratch *S = SCR();
+@@ -1082,6 +1155,8 @@
+     }
+ }
+ 
++#endif
++
+ /* ---------------------------------------------------------------------- */
+ /* ConvNeXt trunk: tiled so the two cores can share a block                 */
+ /* ---------------------------------------------------------------------- */
+@@ -1139,6 +1214,63 @@
+     }
+ }
+ 
++#if defined(SNT_NANO_PW_BATCH) && SNT_NANO_PW_BATCH > 1 && !defined(SNT_NANO_ACT_F32)
++/* BabyTalk: pass 2 on SNT_NANO_PW_BATCH columns at a time. Each weight matrix is run over
++ * all of them in blocks of 8 rows, so a block is fetched once (from PSRAM, for weights that
++ * outgrow the cache, as the 2.27M voice's do on the ESP32-P4) and then read from L1 for the
++ * other columns; one column at a time fetched every matrix again for every column. The
++ * arithmetic per column is unchanged: the same PCM. Buffers per scratch bank. */
++#define PWB SNT_NANO_PW_BATCH
++static signed char g_pwq0[2][PWB][NANO_B0_PW0_N16] __attribute__((aligned(16)));
++static signed char g_pwq1[2][PWB][NANO_B0_PW1_N16] __attribute__((aligned(16)));
++static nano_acc_t g_pwa0[2][PWB][NANO_PW_HIDDEN];
++static nano_acc_t g_pwa1[2][PWB][DIM];
++
++static void matvec_cols(const signed char *act, int astride, int ncols, const nano_w_t *w,
++                        nano_acc_t *out, int ostride, int rows, int len) {
++    for (int r0 = 0; r0 < rows; r0 += 8) {
++        int nr = rows - r0 < 8 ? rows - r0 : 8;
++        for (int k = 0; k < ncols; k++)
++            nano_matvec(act + (size_t)k * astride, w + (size_t)r0 * len,
++                        out + (size_t)k * ostride + r0, nr, len);
++    }
++}
++
++/* pass 2: pw0 -> GELU -> pw1 -> LayerScale -> residual. Writes x only. */
++static void tr_pw_range(int lo, int hi, void *vc) {
++    TrCtx *c = (TrCtx *)vc;
++    NanoScratch *S = SCR();
++    int id = snt_scratch_id();
++    float s0[PWB], s1[PWB];
++    for (int u0 = lo; u0 < hi; u0 += PWB) {
++        int nb = hi - u0 < PWB ? hi - u0 : PWB;
++        for (int k = 0; k < nb; k++) {
++            const float *ncol = c->tc + (size_t)(u0 + k) * DIM;
++            for (int i = 0; i < DIM; i++) S->gather[i] = ncol[i];
++            s0[k] = quant_gather(S, DIM, NANO_B0_PW0_N16);
++            memcpy(g_pwq0[id][k], S->qbuf, NANO_B0_PW0_N16);
++        }
++        matvec_cols(g_pwq0[id][0], NANO_B0_PW0_N16, nb, c->pw0, g_pwa0[id][0], NANO_PW_HIDDEN,
++                    NANO_PW_HIDDEN, NANO_B0_PW0_N16);
++        for (int k = 0; k < nb; k++) {
++            const nano_acc_t *a = g_pwa0[id][k];
++            for (int o = 0; o < NANO_PW_HIDDEN; o++)
++                S->gather[o] = ACT(s0[k] * c->pw0s[o] * (float)a[o] + c->pw0b[o]);
++            s1[k] = quant_gather(S, NANO_PW_HIDDEN, NANO_B0_PW1_N16);
++            memcpy(g_pwq1[id][k], S->qbuf, NANO_B0_PW1_N16);
++        }
++        matvec_cols(g_pwq1[id][0], NANO_B0_PW1_N16, nb, c->pw1, g_pwa1[id][0], DIM,
++                    DIM, NANO_B0_PW1_N16);
++        for (int k = 0; k < nb; k++) {
++            int xc = WCOL(c->xw, c->x0, c->t0 + u0 + k);
++            const nano_acc_t *a = g_pwa1[id][k];
++            for (int ch = 0; ch < DIM; ch++)
++                c->x[(size_t)ch * c->xw + xc] += c->gamma[ch] *
++                    (s1[k] * c->pw1s[ch] * (float)a[ch] + c->pw1b[ch]);
++        }
++    }
++}
++#else
+ /* pass 2: pw0 -> GELU -> pw1 -> LayerScale -> residual. Writes x only. */
+ static void tr_pw_range(int lo, int hi, void *vc) {
+     TrCtx *c = (TrCtx *)vc;
+@@ -1162,6 +1294,8 @@
+     }
+ }
+ 
++#endif
++
+ /* ---------------------------------------------------------------------- */
+ /* head int8 + spectrum, fused and split across cores                       */
+ /* ---------------------------------------------------------------------- */
+@@ -1213,6 +1347,48 @@
+     }
+ }
+ 
++#if defined(SNT_NANO_PW_BATCH) && SNT_NANO_PW_BATCH > 1 && !defined(SNT_NANO_ACT_F32)
++/* BabyTalk: both frames of a head pair in one range, each weight block fetched once for the two
++ * (matvec_cols); per frame the same arithmetic as head_spec_range. */
++static signed char g_hq[2][NANO_HEAD_N16] __attribute__((aligned(16)));
++static nano_acc_t g_hacc[2][NANO_HEAD_OUT];
++typedef struct {
++    const nano_w_t *hw;
++    const float *hs, *hb;
++    int np;
++    float s_act[2], *fre[2], *fim[2];
++} Head2Ctx;
++
++static void head2_range(int lo, int hi, void *vc) {
++    Head2Ctx *c = (Head2Ctx *)vc;
++    int n = hi - lo;
++    matvec_cols(g_hq[0], NANO_HEAD_N16, c->np, c->hw + (size_t)lo * NANO_HEAD_N16,
++                g_hacc[0] + lo, NANO_HEAD_OUT, n, NANO_HEAD_N16);
++    matvec_cols(g_hq[0], NANO_HEAD_N16, c->np, c->hw + (size_t)(BINS + lo) * NANO_HEAD_N16,
++                g_hacc[0] + BINS + lo, NANO_HEAD_OUT, n, NANO_HEAD_N16);
++    for (int p = 0; p < c->np; p++) {
++        const nano_acc_t *acc = g_hacc[p];
++        for (int k = lo; k < hi; k++) {
++            float m;
++            if (k == 0 || k == BINS - 1) {
++                m = 0.0f;                      /* DC and Nyquist stay zeroed */
++            } else {
++                float lm = c->s_act[p] * c->hs[k] * (float)acc[k] + c->hb[k];
++                if (lm > 60.0f) lm = 60.0f;    /* overflow guard only */
++                m = EXPF_M(lm);
++                if (m > MAG_CLIP) m = MAG_CLIP;
++            }
++            float phi = c->s_act[p] * c->hs[BINS + k] * (float)acc[BINS + k]
++                      + c->hb[BINS + k];
++            float cs, sn;
++            snt_nano_sincos(phi, &cs, &sn);
++            c->fre[p][k] = m * cs;
++            c->fim[p][k] = m * sn;
++        }
++    }
++}
++#endif
++
+ /* ---------------------------------------------------------------------- */
+ /* iSTFT (reused unchanged from snt_tts.c: same n_fft, same hop, same win)  */
+ /* ---------------------------------------------------------------------- */
+@@ -2039,6 +2215,44 @@
+             for (int t0 = fa; t0 < fb && !aborted; t0 += 2) {
+                 int np = (t0 + 1 < fb) ? 2 : 1;   /* frames processed in this pair */
+ 
++#if defined(SNT_NANO_PW_BATCH) && SNT_NANO_PW_BATCH > 1 && !defined(SNT_NANO_ACT_F32)
++                /* BabyTalk: both frames' LayerNorm + quantise, then one parallel
++                 * head-int8 + spectrum range for the pair (head2_range), then the packs */
++                {
++                    Head2Ctx h2 = {hw, hs, hb, np, {0.0f, 0.0f}, {fre[0], fre[1]}, {fim[0], fim[1]}};
++                    PROF_T0N(hd);
++                    for (int p = 0; p < np; p++) {
++                        int t = t0 + p;
++                        float col[DIM], ncol[DIM];
++                        for (int c = 0; c < DIM; c++)
++                            col[c] = x[(size_t)c * pwin + WCOL(pwin, porg, t)];
++                        NORM_COL(ncol, col, fga, fgw, fgb, DIM);
++                        for (int i = 0; i < DIM; i++) S->gather[i] = ncol[i];
++                        h2.s_act[p] = quant_gather(S, DIM, NANO_HEAD_N16);
++                        memcpy(g_hq[p], S->qbuf, NANO_HEAD_N16);
++                    }
++                    PROF_ADDN(PR_HEAD, hd);
++                    PROF_T0N(sp);
++                    snt_par_run(head2_range, BINS, &h2);
++                    PROF_ADDN(PR_SPEC, sp);
++                }
++                for (int p = 0; p < np; p++) {
++                    PROF_T0N(pk);
++                    /* real IFFT via an N/2 complex IFFT (Hermitian pack) -- R7's path */
++                    for (int k = 0; k < NFFT / 2; k++) {
++                        float xr = fre[p][k], xi = fim[p][k];
++                        float mr = fre[p][NFFT / 2 - k], mi = fim[p][NFFT / 2 - k];
++                        float ar = 0.5f * (xr + mr), ai = 0.5f * (xi - mi);
++                        float dr = xr - mr, di = xi + mi;
++                        float br = 0.5f * (dr * cwre[k] - di * cwim[k]);
++                        float bi2 = 0.5f * (dr * cwim[k] + di * cwre[k]);
++                        zre[p][k] = ar - bi2;
++                        zim[p][k] = ai + br;
++                    }
++                    PROF_ADDN(PR_FFT, pk);
++                }
++
++#else
+                 /* --- per frame: head LayerNorm + quantise, then the parallel
+                  *     head-int8 + spectrum range, then the Hermitian pack --- */
+                 for (int p = 0; p < np; p++) {
+@@ -2075,6 +2289,7 @@
+                     PROF_ADDN(PR_FFT, pk);
+                 }
+ 
++#endif
+                 PROF_T0N(ff);
+                 {
+                     FftCtx fc;

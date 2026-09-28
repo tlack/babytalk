@@ -26,13 +26,17 @@ config BABYTALK_STACKS_IN_PSRAM
         a stack in PSRAM costs little.
 
 choice BABYTALK_BOARD
-    prompt "BabyTalk audio board"
+    prompt "BabyTalk audio board (the default; apps can pick another at run time)"
     default BABYTALK_BOARD_WAVESHARE_P4_WIFI6 if IDF_TARGET_ESP32P4
     default BABYTALK_BOARD_WAVESHARE_S3_CAM
     depends on AVM_ENABLE_BABYTALK_NIFS
     help
-        Which board_audio.c drives the microphone and speaker. The engines and NIFs are
-        board-independent; only board_audio.h's functions touch the hardware.
+        The board the built-in audio driver (board_audio.c) assumes until the app says
+        otherwise. Pins, codecs and the amp switch are run-time settings:
+        babytalk:audio_config/1 picks a preset or overrides any field, so one firmware per
+        chip serves every board built from BabyTalk's supported parts (ES7210, ES8311; amp
+        and rail on a GPIO or an IO expander). No pin is touched before the first
+        listen/play or audio_config call. See atomvm/README.md, "Your board's pins".
 
 config BABYTALK_BOARD_WAVESHARE_S3_CAM
     bool "Waveshare ESP32-S3-CAM (ES7210 mics, ES8311 + NS4150B speaker, CH32V003 expander)"
@@ -44,7 +48,8 @@ config BABYTALK_BOARD_WAVESHARE_P4_WIFI6
 config BABYTALK_BOARD_CUSTOM
     bool "Custom: another component implements board_audio.h"
     help
-        board_audio.c is left out; some other component in the firmware (your board's) must
-        define every function in board_audio.h. That component can include board_audio.h by
-        adding atomvm_babytalk to its REQUIRES.
+        For audio chips the built-in driver doesn't know. board_audio.c compiles to nothing;
+        some other component in the firmware (your board's) must define every function in
+        board_audio.h, and babytalk:audio_config/1 returns {error, custom_board}. That
+        component can include board_audio.h by adding atomvm_babytalk to its REQUIRES.
 endchoice

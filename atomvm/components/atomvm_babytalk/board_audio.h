@@ -1,11 +1,8 @@
 // The board's microphone and speaker, for BabyTalk's AtomVM NIFs: the only hardware-specific
-// part of BabyTalk. board_audio.c implements it for the Waveshare ESP32-S3-CAM:
-//   ES7210   4-mic ADC (mic 1 used)          I2C 0x40 + I2S in
-//   ES8311   mono codec, DAC side            I2C 0x18 + I2S out
-//   NS4150B  3 W class-D speaker amp         enable = expander P4
-//   CH32V003 MCU as 8-bit IO expander        I2C 0x24: P6 = audio rail, P4 = amp enable
-// Another board implements these functions in its own component and selects
-// CONFIG_BABYTALK_BOARD_CUSTOM (see Kconfig).
+// part of BabyTalk. board_audio.c implements it for boards built from ES7210/ES8311 codecs,
+// with the pins, I2C addresses and amp/rail switches chosen at run time
+// (board_audio_config.h, babytalk:audio_config/1). A board with other audio chips implements
+// these functions in its own component and selects CONFIG_BABYTALK_BOARD_CUSTOM (see Kconfig).
 //
 // The contract: 16 kHz mono signed 16-bit capture; mono playback at any rate the board can
 // do (8..48 kHz). The mic and the speaker may share one I2S port, so the NIFs never overlap
@@ -21,8 +18,8 @@ extern "C" {
 #endif
 
 // Bring the audio chips up (rails on, amp off). Once; later calls return 0 at once.
-// mic_gain: the board's own PGA step, or -1 for the board's default. Negative on failure
-// (the Waveshare's: -1 bus, -2 expander, -3 ES7210, -4 ES8311).
+// mic_gain: the codec's own gain step, or -1 for the board's default. Negative on failure
+// (board_audio.c: -1 I2C bus, -2 rail/amp switch, -3 mic codec, -4 speaker codec).
 int board_audio_init(int mic_gain);
 
 // Capture at 16 kHz; discards the first 200 ms (ADC/filter settling).

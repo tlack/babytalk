@@ -94,8 +94,9 @@ a small `gen_server` turns it into an outgoing message and speaks incoming ones.
 page. Licensing is now worked out: images with speech to text only are MIT/Apache/CC-BY
 (attribution); images with text to speech should ship as GPL-3.0 with source until sanoTTS
 clarifies three files ([components/sanotts/LICENSES.md](../components/sanotts/LICENSES.md)).
-Limit to state up front: images serve one board (Waveshare ESP32-S3-CAM) until more boards
-have audio drivers.
+One image per chip (ESP32-S3, ESP32-P4) serves every board built from the supported audio
+chips (ES7210, ES8311): the app sets the pins at run time (`babytalk:audio_config/1`). Boards
+with other audio chips need a driver first.
 
 ## 8. Other languages, and more boards
 
@@ -107,7 +108,8 @@ pronunciation step. Full breakdown: [MODELS.md](MODELS.md#4-another-language).
 
 **Boards:** the T-Watch S3 Plus is the next target in our notes. Everything above the audio
 driver is board-independent; the watch has different audio hardware from the S3-CAM's
-ES7210/ES8311 pair, so it needs its own `board_audio` driver (and pin map), plus a memory check.
+ES7210/ES8311 pair, so it needs its own `board_audio` driver, plus a memory check. Boards with
+ES7210/ES8311 audio need only a pin map, set at run time (`babytalk:audio_config/1`).
 
 ## 9. Publish the field dataset and the hard-words workflow
 

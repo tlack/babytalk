@@ -334,10 +334,13 @@ speech to text, text to speech, a wake phrase with audible chimes, microphone an
 run by a supervised `gen_server`, plus **MMRT** as a standalone library of int8/int4 vector kernels
 (matvec, matmul, dot, top-k... on the S3's or the P4's SIMD unit) for any AtomVM project. Transcripts are
 identical to the MicroPython firmware's. AtomVM has no I2S driver yet, so BabyTalk brings its
-own C drivers for the board's audio chips (ES7210 mic ADC, ES8311 codec, NS4150B amp,
-CH32V003 IO expander).
+own C drivers for the audio chips (ES7210 mic ADC, ES8311 codec, a speaker amp and power
+switched by a GPIO or an IO expander). **Pins and parts are chosen at run time**: one
+firmware per chip, and your app picks a board preset or its own pins
+(`babytalk:audio_config/1`, [atomvm/README.md#boards-and-pins](atomvm/README.md#boards-and-pins)).
 
 ```erlang
+ok = babytalk:audio_config(waveshare_s3_cam),       % or your own pins: a map
 {ok, Pcm} = babytalk:record(3),
 {ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000),
 ok = babytalk:speak([<<"You said: ">>, Text]).
@@ -352,7 +355,10 @@ ok = babytalk:speak([<<"You said: ">>, Text]).
 - The int4 model trades ~2 points of accuracy for size (see the table above).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
 - Tested on two boards: the Waveshare ESP32-S3-CAM, and (from AtomVM) the Waveshare
-  ESP32-P4-WIFI6. Another board needs its own pins and audio codec driver (`board_audio.h`).
+  ESP32-P4-WIFI6. From AtomVM, another board with the same audio chips (ES7210/ES8311) needs
+  only its pins, set at run time (`babytalk:audio_config/1`); other chips need a C driver
+  (`board_audio.h`). MicroPython's drivers (`mpy/drivers/`) work on the I2C bus and I2S port
+  your script opens, so their pins are already yours to choose.
 - Listening and speaking take turns (they share one block of internal RAM).
 - Under MicroPython, speech to text can't run while WiFi is on: WiFi takes the internal RAM
   it needs (6.7 KB left). The AtomVM firmware keeps ~42 KB with WiFi up and can.

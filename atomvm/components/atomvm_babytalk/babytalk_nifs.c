@@ -18,6 +18,11 @@
 //   babytalk:info() -> [{Key, Value}]
 //   babytalk:heap_info() -> [{internal_free, B}, {internal_largest, B}, {psram_free, B}, {psram_largest, B},
 //                            {pool_bytes, B}]   (pool_bytes: 0 when the engines' block wasn't reserved at boot)
+//   babytalk:audio_config_nif(Tuple) -> {ok, Ref} | {error, busy | custom_board | {bad_field, N}}
+//       then {babytalk_audio, Ref, ok | {error, Code}}: the old pins released, the new board brought up
+//   babytalk:audio_current_nif() -> Tuple | undefined (custom board)
+//   babytalk:audio_presets_nif() -> [{Name, Tuple}]
+//       (Tuple: board_audio_config_t flattened, in babytalk.erl's order; the maps live in Erlang)
 //
 // Inference (0.3-2 s) runs on our own FreeRTOS task, never on a scheduler: AtomVM has no
 // dirty NIFs. The model is the "model" flash partition (components/stt_engine).
@@ -50,6 +55,9 @@
 #include <freertos/task.h>
 
 #include "board_audio.h"
+#ifndef CONFIG_BABYTALK_BOARD_CUSTOM
+#include "board_audio_config.h"
+#endif
 #include "tts_engine.h"
 #include "sram_pool.h"
 #include "stt_engine.h"
@@ -60,6 +68,7 @@
 static const char *const A_BABYTALK = "\x08" "babytalk";
 static const char *const A_BABYTALK_MIC = "\x0C" "babytalk_mic";
 static const char *const A_BABYTALK_PLAY = "\x0D" "babytalk_play";
+static const char *const A_BABYTALK_AUDIO = "\x0E" "babytalk_audio";
 static const char *const A_PHONEMES = "\x08" "phonemes";
 static const char *const A_G2P_MS = "\x06" "g2p_ms";
 static const char *const A_SYNTH_MS = "\x08" "synth_ms";
@@ -252,10 +261,11 @@ static void worker(void *arg)
 // ------------------------------------------------------------------------------ audio task
 // Owns the board's audio (board_audio.c): streams the microphone to one listener in
 // ChunkMs pieces, independently of the engine (so audio keeps flowing while a transcription
-// runs), or plays PCM through the speaker. The two share one I2S port, so they take turns:
-// one claim at a time (listen() .. `stopped`, play() .. `done`). Core 1, priority 6: above
-// the inference worker, so the I2S DMA ring (256 ms) is served on time.
-enum { AUDIO_LISTEN, AUDIO_PLAY };
+// runs), or plays PCM through the speaker, or switches to another board configuration. The
+// two share one I2S port, so they take turns: one claim at a time (listen() .. `stopped`,
+// play() .. `done`, audio_config .. its reply). Core 1, priority 6: above the inference
+// worker, so the I2S DMA ring (256 ms) is served on time.
+enum { AUDIO_LISTEN, AUDIO_PLAY, AUDIO_CONFIG };
 static SemaphoreHandle_t s_audio_go;
 static atomic_int s_audio_claimed;
 static atomic_int s_mic_on;  // 1 while a listener wants chunks
@@ -266,6 +276,9 @@ static struct {
     int frames;         // listen: per chunk
     int16_t *pcm;       // play: PSRAM copy, freed by the task
     int n, rate, volume;
+#ifndef CONFIG_BABYTALK_BOARD_CUSTOM
+    board_audio_config_t cfg;  // config: the new board
+#endif
 } s_aj;
 
 // {Tag, Ref, Payload}; Payload is built by `fill` on the message heap (an invalid term: send nothing)
@@ -317,6 +330,17 @@ static void audio_task(void *arg)
     (void) arg;
     for (;;) {
         xSemaphoreTake(s_audio_go, portMAX_DELAY);
+#ifndef CONFIG_BABYTALK_BOARD_CUSTOM
+        if (s_aj.kind == AUDIO_CONFIG) {
+            board_audio_configure(&s_aj.cfg);
+            int rc = board_audio_init(MIC_GAIN);  // bring it up now: a wrong pin or address shows at once
+            if (rc) ESP_LOGW(TAG, "audio board: init failed (%d)", rc);
+            atomic_store(&s_audio_claimed, 0);
+            if (rc) send_audio(A_BABYTALK_AUDIO, TUPLE_SIZE(2), fill_error, &rc);
+            else send_audio(A_BABYTALK_AUDIO, 0, fill_atom, (void *) "\x02" "ok");
+            continue;
+        }
+#endif
         int rc = board_audio_init(MIC_GAIN);  // once; later calls return at once
         if (s_aj.kind == AUDIO_PLAY) {
             if (!rc) rc = board_audio_play(s_aj.pcm, s_aj.n, s_aj.rate, s_aj.volume);
@@ -562,6 +586,142 @@ static term nif_stop_listening(Context *ctx, int argc, term argv[])
     return OK_ATOM;
 }
 
+// ------------------------------------------------------------------------------ audio board
+// The board configuration crosses as a flat tuple of integers (babytalk.erl turns it into
+// and from maps): I2C port, SDA, SCL, Hz; I2S port, MCLK, BCLK, WS, DOUT, DIN; mic codec,
+// address, gain, slot; speaker codec, address; amp kind, address, pin, active_low; power
+// the same. Pins -1 = unused.
+#define AUDIO_FIELDS 24
+
+#ifndef CONFIG_BABYTALK_BOARD_CUSTOM
+static void ctl_to(avm_int_t *v, const board_audio_ctl_t *c)
+{
+    v[0] = c->kind;
+    v[1] = c->addr;
+    v[2] = c->pin;
+    v[3] = c->active_low;
+}
+
+static void ctl_from(board_audio_ctl_t *c, const avm_int_t *v)
+{
+    c->kind = (int8_t) v[0];
+    c->addr = (uint8_t) v[1];
+    c->pin = (int8_t) v[2];
+    c->active_low = (int8_t) v[3];
+}
+
+static void cfg_to(avm_int_t *v, const board_audio_config_t *c)
+{
+    const avm_int_t a[16] = {c->i2c_port, c->sda, c->scl, c->i2c_hz, c->i2s_port, c->mclk, c->bclk, c->ws,
+                             c->dout, c->din, c->mic, c->mic_addr, c->mic_gain, c->mic_slot, c->spk, c->spk_addr};
+    memcpy(v, a, sizeof(a));
+    ctl_to(v + 16, &c->amp);
+    ctl_to(v + 20, &c->power);
+}
+
+// 0, or the first field out of its type's range (1-based)
+static int cfg_from(board_audio_config_t *c, const avm_int_t *v)
+{
+    for (int i = 0; i < AUDIO_FIELDS; i++) {
+        const avm_int_t lo = i == 3 ? 0 : -128, hi = i == 3 ? 10000000 : 255;
+        if (v[i] < lo || v[i] > hi) return i + 1;
+    }
+    *c = (board_audio_config_t) {
+        .i2c_port = (int8_t) v[0], .sda = (int8_t) v[1], .scl = (int8_t) v[2], .i2c_hz = (int32_t) v[3],
+        .i2s_port = (int8_t) v[4], .mclk = (int8_t) v[5], .bclk = (int8_t) v[6], .ws = (int8_t) v[7],
+        .dout = (int8_t) v[8], .din = (int8_t) v[9], .mic = (int8_t) v[10], .mic_addr = (int8_t) v[11],
+        .mic_gain = (int8_t) v[12], .mic_slot = (int8_t) v[13], .spk = (int8_t) v[14], .spk_addr = (int8_t) v[15]};
+    ctl_from(&c->amp, v + 16);
+    ctl_from(&c->power, v + 20);
+    return 0;
+}
+
+// needs TUPLE_SIZE(AUDIO_FIELDS) words
+static term cfg_tuple(Heap *h, const board_audio_config_t *c)
+{
+    avm_int_t v[AUDIO_FIELDS];
+    cfg_to(v, c);
+    term t = term_alloc_tuple(AUDIO_FIELDS, h);
+    for (int i = 0; i < AUDIO_FIELDS; i++) term_put_tuple_element(t, i, term_from_int(v[i]));
+    return t;
+}
+#endif
+
+// audio_config_nif(Tuple) -> {ok, Ref}: the audio task releases the old board, adopts this
+// one and brings it up, then replies {babytalk_audio, Ref, ok | {error, Code}}
+static term nif_audio_config(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+    VALIDATE_VALUE(argv[0], term_is_tuple);
+    if (term_get_tuple_arity(argv[0]) != AUDIO_FIELDS) RAISE_ERROR(BADARG_ATOM);
+    avm_int_t v[AUDIO_FIELDS];
+    for (int i = 0; i < AUDIO_FIELDS; i++) {
+        term e = term_get_tuple_element(argv[0], i);
+        VALIDATE_VALUE(e, term_is_integer);
+        v[i] = term_to_int(e);
+    }
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) * 2 + REF_SIZE) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+#ifdef CONFIG_BABYTALK_BOARD_CUSTOM
+    UNUSED(v);
+    return error_tuple(&ctx->heap, atom(ctx->global, "\x0C" "custom_board"));
+#else
+    board_audio_config_t c;
+    int bad = cfg_from(&c, v);
+    if (!bad) bad = board_audio_check(&c);
+    if (bad) {
+        term t = term_alloc_tuple(2, &ctx->heap);
+        term_put_tuple_element(t, 0, atom(ctx->global, "\x09" "bad_field"));
+        term_put_tuple_element(t, 1, term_from_int(bad));
+        return error_tuple(&ctx->heap, t);
+    }
+    if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
+    s_aj.kind = AUDIO_CONFIG;
+    s_aj.pid = ctx->process_id;
+    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.cfg = c;
+    xSemaphoreGive(s_audio_go);
+    term t = term_alloc_tuple(2, &ctx->heap);
+    term_put_tuple_element(t, 0, OK_ATOM);
+    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
+    return t;
+#endif
+}
+
+// audio_current_nif() -> Tuple (the board in force) | undefined (a custom board_audio)
+static term nif_audio_current(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+    UNUSED(argv);
+#ifdef CONFIG_BABYTALK_BOARD_CUSTOM
+    UNUSED(ctx);
+    return UNDEFINED_ATOM;
+#else
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(AUDIO_FIELDS)) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    return cfg_tuple(&ctx->heap, board_audio_config());
+#endif
+}
+
+// audio_presets_nif() -> [{Name, Tuple}] (the boards compiled in; [] for a custom board_audio)
+static term nif_audio_presets(Context *ctx, int argc, term argv[])
+{
+    UNUSED(argc);
+    UNUSED(argv);
+    term list = term_nil();
+#ifndef CONFIG_BABYTALK_BOARD_CUSTOM
+    const int n = board_audio_n_presets;
+    if (UNLIKELY(memory_ensure_free(ctx, n * (TUPLE_SIZE(AUDIO_FIELDS) + TUPLE_SIZE(2) + CONS_SIZE)) != MEMORY_GC_OK)) {
+        RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        term cfg = cfg_tuple(&ctx->heap, &board_audio_presets[i].cfg);
+        list = prop(&ctx->heap, atom(ctx->global, board_audio_presets[i].name), cfg, list);
+    }
+#else
+    UNUSED(ctx);
+#endif
+    return list;
+}
+
 static term ok_int(Context *ctx, avm_int_t v)
 {
     term t = term_alloc_tuple(2, &ctx->heap);
@@ -676,6 +836,9 @@ NIF(phrase, nif_phrase);
 NIF(cache, nif_cache);
 NIF(info, nif_info);
 NIF(heap_info, nif_heap_info);
+NIF(audio_config, nif_audio_config);
+NIF(audio_current, nif_audio_current);
+NIF(audio_presets, nif_audio_presets);
 
 static const struct {
     const char *name;  // "fun/arity"
@@ -685,6 +848,8 @@ static const struct {
     {"tones_nif/2", &tones_nif}, {"rms/1", &rms_nif}, {"say_nif/2", &say_nif},
     {"stop_listening/0", &stop_listening_nif}, {"phrase/1", &phrase_nif}, {"cache/1", &cache_nif},
     {"info/0", &info_nif}, {"heap_info/0", &heap_info_nif},
+    {"audio_config_nif/1", &audio_config_nif}, {"audio_current_nif/0", &audio_current_nif},
+    {"audio_presets_nif/0", &audio_presets_nif},
 };
 
 // The Elixir module BabyTalk delegates to :babytalk, so only "babytalk:..." names resolve here.

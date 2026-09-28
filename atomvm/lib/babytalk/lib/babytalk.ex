@@ -1,8 +1,10 @@
 defmodule BabyTalk do
   @moduledoc """
-  On-device speech to text for AtomVM on the ESP32-S3: a thin wrapper over the Erlang
-  `:babytalk` module (see `atomvm/lib/babytalk/src/babytalk.erl` for the details).
+  On-device speech to text and text to speech for AtomVM on the ESP32-S3 and ESP32-P4: a
+  thin wrapper over the Erlang `:babytalk` module (see `atomvm/lib/babytalk/src/babytalk.erl`
+  for the details).
 
+      :ok = BabyTalk.audio_config(%{board: :waveshare_p4_wifi6, amp: {:gpio, 53}})
       {:ok, text, info} = BabyTalk.transcribe_sync(pcm16_mono_16khz, 10_000)
   """
   defdelegate transcribe(pcm), to: :babytalk
@@ -24,4 +26,9 @@ defmodule BabyTalk do
   defdelegate cache(bytes), to: :babytalk
   defdelegate info(), to: :babytalk
   defdelegate heap_info(), to: :babytalk
+  defdelegate reserve_at_boot(on), to: :babytalk
+  defdelegate audio_config(), to: :babytalk
+  defdelegate audio_config(board_or_changes), to: :babytalk
+  defdelegate audio_preset(name), to: :babytalk
+  defdelegate audio_presets(), to: :babytalk
 end

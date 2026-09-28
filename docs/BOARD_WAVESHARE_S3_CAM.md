@@ -5,7 +5,8 @@ Docs: <https://docs.waveshare.com/ESP32-S3-CAM-OVxxxx> ·
 Vendor code (BSP, pin header, examples): <https://github.com/waveshareteam/ESP32-S3-CAM-OVxxxx>
 
 The drivers that use this: `mpy/drivers/` (MicroPython), `stt/main/mic.c`,
-`bench/main/bench_rec.c` and `atomvm/components/atomvm_babytalk/board_audio.c` (AtomVM).
+`bench/main/bench_rec.c` and `atomvm/components/atomvm_babytalk/board_audio.c` (AtomVM, where
+these pins are the preset `waveshare_s3_cam` of `babytalk:audio_config/1`).
 
 ## 1. What's on it
 

@@ -25,7 +25,9 @@
 %% enroll a wake phrase first (apps/wakeword_demo).
 %%
 %% Put it under a supervisor: if the mic or the engine fails, it crashes and restarts clean.
-%% Options (map): notify (required); spellings ([binary()], [] = no wake phrase);
+%% Options (map): notify (required); audio (the board's mic and speaker, as
+%% babytalk:audio_config/1 takes it: a preset name or a map; default: leave the board in use
+%% alone); spellings ([binary()], [] = no wake phrase);
 %% threshold (-21.0, from export/kws.py); window_ms (4000) and every_ms (1000) for wake
 %% scoring; silence_ms (700) of quiet that ends a message, max_message_ms (6000);
 %% reply_ms (1500); chunk_ms (125); cues (true); cue_volume (70); voice_volume (76);
@@ -97,6 +99,16 @@ init(Opts0) ->
                         vad => true, vad_factor => 2, vad_min => 200}, Opts0),
     process_flag(trap_exit, true),
     St = #st{opts = Opts},
+    case maps:get(audio, Opts, none) of
+        none -> start(St);
+        Board ->
+            case babytalk:audio_config(Board) of
+                ok -> start(St);
+                {error, Reason} -> {stop, {audio_config, Reason}}
+            end
+    end.
+
+start(#st{opts = Opts} = St) ->
     case maps:get(spellings, Opts) of
         [] -> {ok, output([cue(ready)], idle, St)};              % wait for ask/3 or wake_on/2
         Spellings -> {ok, output([cue(ready)], wake, St#st{phrase = Spellings})}

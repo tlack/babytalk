@@ -1,5 +1,13 @@
 # SANOTTS_BSS_PSRAM builds: every zero-initialized static of the sanoTTS runtime in PSRAM.
+# Our own scheme: ESP-IDF's "extram_bss" is defined by the esp_wifi component, which chips
+# with WiFi through a co-processor (the ESP32-P4) don't build -- the mapping then silently
+# left everything in internal RAM.
+[scheme:sanotts_extram_bss]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
 [mapping:sanotts]
 archive: libsanotts.a
 entries:
-    * (extram_bss)
+    * (sanotts_extram_bss)

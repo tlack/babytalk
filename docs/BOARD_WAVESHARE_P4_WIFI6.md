@@ -75,7 +75,8 @@ Measured with `apps/speed_bench`, PSRAM at **200 MHz** (see below):
 | transcribe 2 s | **0.30 s** (the first run after a boot: 0.65 s) | 0.53 s |
 | transcribe 4 s | 0.54 s | ~0.85 s |
 | transcribe 10 s | 1.35 s | 1.72 s |
-| speak 5.4 s of speech | **1.24 s (0.23 x real time)** | 0.27 x real time |
+| speak 5.4 s of speech (nano voice) | **1.24 s (0.23 x real time)** | 0.27 x real time |
+| speak 5.2 s of speech (heart voice, 2.27M parameters) | 3.0 s (0.51-0.58 x real time) | (too slow: ~2x) |
 
 **Set the PSRAM to 200 MHz.** ESP-IDF 5.5 defaults the P4's PSRAM to 20 MHz, and files 200 MHz
 under experimental features: `CONFIG_IDF_EXPERIMENTAL_FEATURES=y` and `CONFIG_SPIRAM_SPEED_200M=y`.
@@ -90,6 +91,9 @@ live in PSRAM.
   real time, the audio bit-identical. The synthesis `Info` says how much ran on the vector
   unit (`simd_pct`: 100 here). What's left is mostly float work (the spectrum and the inverse
   FFT) and sanoTTS's int16 x int8 kernels, scalar on every chip.
+- A better voice: the P4 can run sanoTTS's 2.27M-parameter `heart` voice (SCOREQ 3.36 against
+  nano's 2.13) at about half real time, on both cores, from a `voice` flash partition read into
+  PSRAM: `docs/TTS_VOICES.md`.
 - Memory: 295 KB of internal RAM free at boot, ~227 KB with WiFi and TLS up. PSRAM: 24 MB free
   once the model's rows are unpacked.
 

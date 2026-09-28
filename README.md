@@ -78,7 +78,8 @@ text -> pronunciation dictionary -> phonemes -> sanoTTS voice -> 24 kHz audio ->
   to pick a threshold that avoids false wakes.
 - **Text to speech** uses the 294k-parameter "nano" voice from
   [sanoTTS](https://github.com/Ampixa/sanoTTS). It is optional: the firmware builds
-  without it.
+  without it. The ESP32-P4 can run sanoTTS's 2.27M-parameter "heart" voice instead, which
+  sounds much better, at half real time ([docs/TTS_VOICES.md](docs/TTS_VOICES.md)).
 
 ### MMRT, the runtime
 
@@ -365,7 +366,8 @@ The fuller list, with what each item takes: [`docs/ROADMAP.md`](docs/ROADMAP.md)
   8- and 4-bit arithmetic simulated (quantization-aware training) to recover their losses.
 - Record in a real vehicle, and on the target device (a LilyGO T-Watch S3 Plus).
 - Transcribe while you are still talking (streaming).
-- A better voice: larger sanoTTS voices, or a voice distilled from bigger TTS models.
+- A better voice on the S3: a voice distilled from bigger TTS models (on the ESP32-P4, sanoTTS's
+  larger heart voice already runs at half real time: `docs/TTS_VOICES.md`).
 - Free more internal RAM so the camera, Bluetooth and speech can all run together.
 - Prebuilt firmware downloads; more boards; more languages.
 

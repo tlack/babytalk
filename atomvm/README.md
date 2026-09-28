@@ -489,6 +489,7 @@ W = mmrt:pack({int8, Weights}, 64, 256),        % 64 outputs x 256 inputs
 | synthesis | -1 | nothing to say (no pronounceable words) |
 | | -2 | no arena for the voice (the engines' pool isn't available) |
 | | -3 | no memory for the resulting PCM |
+| | -4 | this firmware was built without text to speech (no sanoTTS sources) |
 | mic / speaker | -1 | the I2C bus couldn't be opened (see `audio_config/1`), or the port is capturing |
 | | -2 | the amp or rail switch, or the DAC volume write, failed |
 | | -3 / -4 | the mic's / speaker's codec didn't answer |
@@ -499,9 +500,10 @@ W = mmrt:pack({int8, Weights}, 64, 256),        % 64 outputs x 256 inputs
 ## Build and flash
 
 `build.sh` clones the pinned AtomVM tag into `~/build/atomvm` (`AVM_DIR`), applies
-`patches/`, links in `components/` (ours and the shared `mmrt`, `sram_pool`, `stt_engine`,
+`patches/` (fixes to AtomVM itself: see [AtomVM patches](#atomvm-patches)), links in `components/` (ours and the shared `mmrt`, `sram_pool`, `stt_engine`,
 `sanotts` from the repo root), prepares the sanoTTS sources from a checkout (`SANOTTS_DIR`,
-default `~/build/tts/sanoTTS`; without one the firmware builds without text to speech),
+default `~/build/tts/sanoTTS`; without one the firmware builds without text to speech, and
+`say` answers `{error, -4}`),
 applies `sdkconfig.babytalk` and builds. The Erlang/Elixir standard libraries (`boot.avm`)
 come from the official release image, so no host build of AtomVM is needed.
 
@@ -531,6 +533,16 @@ Firmware options (`idf.py menuconfig`, or lines in `sdkconfig.babytalk`):
 | `CONFIG_BABYTALK_RESERVE_AT_BOOT` | y | take the engines' 84.5 KB of internal RAM at boot (see `reserve_at_boot/1`) |
 | `CONFIG_BABYTALK_STACKS_IN_PSRAM` | n | the worker and audio task stacks (16 KB) in PSRAM, for boards short of internal RAM |
 | `CONFIG_SRAM_POOL_IN_PSRAM` | n | the engines' pool in PSRAM (right on the P4, where only synthesis uses it) |
+
+### AtomVM patches
+
+`build.sh` applies these to the AtomVM checkout; an AtomVM build of BabyTalk made any other
+way needs them too.
+
+| Patch | Fixes |
+|---|---|
+| `0001-i2c-resource-guard-whole-file.patch` | with AtomVM's I2C disabled, its old I2C driver was still compiled in, and ESP-IDF aborts when the old and new I2C drivers are both linked |
+| `0002-send-from-task-dead-pid-lock-leak.patch` | **a VM freeze.** A message from a native task (`globalcontext_send_message_from_task`) to a process that has just exited leaked the process table's read lock, and the next spawn or exit waited forever. BabyTalk's audio task hits this when a listener stops: its last `{babytalk_mic, Ref, stopped}` goes to the dead listener |
 
 ## Example apps
 

@@ -281,8 +281,11 @@ static struct {
 #endif
 } s_aj;
 
-// {Tag, Ref, Payload}; Payload is built by `fill` on the message heap (an invalid term: send nothing)
-static void send_audio(const char *tag, size_t extra_words, term (*fill)(Heap *, void *), void *arg)
+// {Tag, Ref, Payload} to Pid; Payload is built by `fill` on the message heap (an invalid term:
+// send nothing). Pid and Ref are the job's own, copied before its claim is released: once it
+// is, a new job may overwrite s_aj while this last message is still to be sent.
+static void send_audio(int32_t pid, uint64_t ref, const char *tag, size_t extra_words,
+                       term (*fill)(Heap *, void *), void *arg)
 {
     GlobalContext *g = s_glb;
     Heap heap;
@@ -297,9 +300,9 @@ static void send_audio(const char *tag, size_t extra_words, term (*fill)(Heap *,
     }
     term msg = term_alloc_tuple(3, &heap);
     term_put_tuple_element(msg, 0, atom(g, tag));
-    term_put_tuple_element(msg, 1, term_from_ref_ticks(s_aj.ref, &heap));
+    term_put_tuple_element(msg, 1, term_from_ref_ticks(ref, &heap));
     term_put_tuple_element(msg, 2, payload);
-    globalcontext_send_message_from_task(g, s_aj.pid, NormalMessage, msg);
+    globalcontext_send_message_from_task(g, pid, NormalMessage, msg);
     memory_destroy_heap(&heap, g);
 }
 
@@ -330,14 +333,16 @@ static void audio_task(void *arg)
     (void) arg;
     for (;;) {
         xSemaphoreTake(s_audio_go, portMAX_DELAY);
+        const int32_t pid = s_aj.pid;
+        const uint64_t ref = s_aj.ref;
 #ifndef CONFIG_BABYTALK_BOARD_CUSTOM
         if (s_aj.kind == AUDIO_CONFIG) {
             board_audio_configure(&s_aj.cfg);
             int rc = board_audio_init(MIC_GAIN);  // bring it up now: a wrong pin or address shows at once
             if (rc) ESP_LOGW(TAG, "audio board: init failed (%d)", rc);
             atomic_store(&s_audio_claimed, 0);
-            if (rc) send_audio(A_BABYTALK_AUDIO, TUPLE_SIZE(2), fill_error, &rc);
-            else send_audio(A_BABYTALK_AUDIO, 0, fill_atom, (void *) "\x02" "ok");
+            if (rc) send_audio(pid, ref, A_BABYTALK_AUDIO, TUPLE_SIZE(2), fill_error, &rc);
+            else send_audio(pid, ref, A_BABYTALK_AUDIO, 0, fill_atom, (void *) "\x02" "ok");
             continue;
         }
 #endif
@@ -348,20 +353,20 @@ static void audio_task(void *arg)
             heap_caps_free(s_aj.pcm);
             if (rc) ESP_LOGW(TAG, "playback failed: %d", rc);
             atomic_store(&s_audio_claimed, 0);
-            if (rc) send_audio(A_BABYTALK_PLAY, TUPLE_SIZE(2), fill_error, &rc);
-            else send_audio(A_BABYTALK_PLAY, 0, fill_atom, (void *) A_DONE);
+            if (rc) send_audio(pid, ref, A_BABYTALK_PLAY, TUPLE_SIZE(2), fill_error, &rc);
+            else send_audio(pid, ref, A_BABYTALK_PLAY, 0, fill_atom, (void *) A_DONE);
             continue;
         }
         if (!rc) rc = board_audio_rx_start();
         while (!rc && atomic_load(&s_mic_on)) {
-            send_audio(A_BABYTALK_MIC, term_binary_heap_size((size_t) s_aj.frames * 2), fill_chunk, &rc);
+            send_audio(pid, ref, A_BABYTALK_MIC, term_binary_heap_size((size_t) s_aj.frames * 2), fill_chunk, &rc);
         }
         board_audio_rx_stop();
         if (rc) ESP_LOGW(TAG, "mic failed: %d", rc);
         atomic_store(&s_mic_on, 0);
         atomic_store(&s_audio_claimed, 0);
-        if (rc) send_audio(A_BABYTALK_MIC, TUPLE_SIZE(2), fill_error, &rc);
-        else send_audio(A_BABYTALK_MIC, 0, fill_atom, (void *) A_STOPPED);
+        if (rc) send_audio(pid, ref, A_BABYTALK_MIC, TUPLE_SIZE(2), fill_error, &rc);
+        else send_audio(pid, ref, A_BABYTALK_MIC, 0, fill_atom, (void *) A_STOPPED);
     }
 }
 
@@ -416,13 +421,14 @@ static term nif_listen(Context *ctx, int argc, term argv[])
     if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
     s_aj.kind = AUDIO_LISTEN;
     s_aj.pid = ctx->process_id;
-    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    const uint64_t ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.ref = ref;
     s_aj.frames = (int) ms * 16;
     atomic_store(&s_mic_on, 1);
     xSemaphoreGive(s_audio_go);
     term t = term_alloc_tuple(2, &ctx->heap);
     term_put_tuple_element(t, 0, OK_ATOM);
-    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
+    term_put_tuple_element(t, 1, term_from_ref_ticks(ref, &ctx->heap));
     return t;
 }
 
@@ -431,7 +437,8 @@ static term start_play(Context *ctx, int16_t *pcm, int n, int rate, int volume)
 {
     s_aj.kind = AUDIO_PLAY;
     s_aj.pid = ctx->process_id;
-    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    const uint64_t ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.ref = ref;
     s_aj.pcm = pcm;
     s_aj.n = n;
     s_aj.rate = rate;
@@ -439,7 +446,7 @@ static term start_play(Context *ctx, int16_t *pcm, int n, int rate, int volume)
     xSemaphoreGive(s_audio_go);
     term t = term_alloc_tuple(2, &ctx->heap);
     term_put_tuple_element(t, 0, OK_ATOM);
-    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
+    term_put_tuple_element(t, 1, term_from_ref_ticks(ref, &ctx->heap));
     return t;
 }
 
@@ -677,12 +684,13 @@ static term nif_audio_config(Context *ctx, int argc, term argv[])
     if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
     s_aj.kind = AUDIO_CONFIG;
     s_aj.pid = ctx->process_id;
-    s_aj.ref = globalcontext_get_ref_ticks(ctx->global);
+    const uint64_t ref = globalcontext_get_ref_ticks(ctx->global);
+    s_aj.ref = ref;
     s_aj.cfg = c;
     xSemaphoreGive(s_audio_go);
     term t = term_alloc_tuple(2, &ctx->heap);
     term_put_tuple_element(t, 0, OK_ATOM);
-    term_put_tuple_element(t, 1, term_from_ref_ticks(s_aj.ref, &ctx->heap));
+    term_put_tuple_element(t, 1, term_from_ref_ticks(ref, &ctx->heap));
     return t;
 #endif
 }

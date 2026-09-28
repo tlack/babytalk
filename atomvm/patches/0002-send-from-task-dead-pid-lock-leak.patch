@@ -1,0 +1,21 @@
+diff --git a/src/libAtomVM/globalcontext.c b/src/libAtomVM/globalcontext.c
+index 59d30e0e..6035efa3 100644
+--- a/src/libAtomVM/globalcontext.c
++++ b/src/libAtomVM/globalcontext.c
+@@ -387,10 +387,15 @@ static bool globalcontext_get_process_trylock(GlobalContext *glb, int32_t proces
+ 
+         if (p->process_id == process_id) {
+             *output = p;
+-            break;
++            return true;
+         }
+     }
+ 
++    // not found: nothing for the caller to unlock (globalcontext_get_process_unlock(NULL) is a
++    // no-op), so the read lock goes now -- else it leaks, and the next spawn / exit (a write
++    // lock) waits forever: a message from a native task to a process that had just exited
++    // froze the whole VM
++    synclist_unlock(&glb->processes_table);
+     return true;
+ }
+ #endif

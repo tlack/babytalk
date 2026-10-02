@@ -11,7 +11,8 @@ The code that makes it work:
 - `mmrt/mmrt_port.c`: MMRT's portable kernels (plain C, bit-exact with `mmrt_ref.c`), used on
   any chip without the S3's vector unit;
 - `mmrt/mmrt_p4.S`: the ESP32-P4's vector unit, for the 1x1 and depthwise convolutions;
-- `atomvm/components/atomvm_babytalk/board_audio_p4_wifi6.c`: this board's audio chips.
+- `atomvm/components/atomvm_babytalk/board_audio.c`: the audio driver, with this board's pins
+  as the preset `waveshare_p4_wifi6` (`babytalk:audio_config/1`; the default on a P4).
 
 ## 1. What's on it
 
@@ -35,9 +36,12 @@ The code that makes it work:
 | NS4150B enable (PA) | 53, high = on |
 | Console UART (the USB-C port's CH343) | 37 / 38 |
 
-`board_audio_p4_wifi6.c` is the ES8311 set up for both directions at once (Espressif's
+The preset `waveshare_p4_wifi6` sets the ES8311 up for both directions at once (Espressif's
 esp_codec_dev register sequence), on one I2S port that the mic and the speaker take turns
-on, as on every BabyTalk board. The amp is on only while playing.
+on, as on every BabyTalk board. The amp is on only while playing. A board with the same
+parts on other pins (a lookalike, a revision) needs no rebuild:
+`babytalk:audio_config(#{board => waveshare_p4_wifi6, amp => {gpio, N}})`, or any other key
+([../atomvm/README.md#boards-and-pins](../atomvm/README.md#boards-and-pins)).
 
 ## 3. Building for the P4
 
@@ -54,8 +58,8 @@ these differences:
 3. AtomVM release-0.7 needs one patch on the P4: its GPIO deep-sleep hold NIFs call
    functions ESP-IDF only declares on chips that have deep-sleep pad hold, and the P4 has none.
    The guard needs `SOC_GPIO_SUPPORT_HOLD_IO_IN_DSLP && !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP`.
-4. **BabyTalk's settings**: the board `CONFIG_BABYTALK_BOARD_WAVESHARE_P4_WIFI6=y` (the
-   default on a P4), and the engines' 84.5 KB pool in PSRAM, `CONFIG_SRAM_POOL_IN_PSRAM=y`.
+4. **BabyTalk's settings**: the default board `CONFIG_BABYTALK_BOARD_WAVESHARE_P4_WIFI6=y`
+   (already the default on a P4; apps can pick another at run time), and the engines' 84.5 KB pool in PSRAM, `CONFIG_SRAM_POOL_IN_PSRAM=y`.
    On the P4 only speech synthesis uses the pool, and it runs as fast from PSRAM. The internal
    RAM goes to the recognizer's activations instead. Also set `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`
    (sanoTTS's static buffers) and `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`.

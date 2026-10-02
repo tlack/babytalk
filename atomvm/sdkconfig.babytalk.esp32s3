@@ -1,0 +1,23 @@
+# ESP32-S3 (atomvm/build.sh esp32s3): the Waveshare ESP32-S3-CAM's ESP32-S3R8, 16 MB QIO
+# flash, 8 MB octal PSRAM. Loaded by ESP-IDF after sdkconfig.babytalk when the target is esp32s3.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Cache geometry the MMRT kernels were measured with
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# Console on the chip's USB-Serial-JTAG (same USB identity as download mode)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# WiFi internal-RAM diet, as the MicroPython firmware (mpy/) runs it: with the 84.5 KB engine
+# pool reserved, AtomVM's defaults (16 static RX buffers, BA window 16, WiFi code in IRAM --
+# IRAM and DRAM share the S3's SRAM) left 14 KB internal after joining, and lwIP reset TCP
+# connections. (TX buffers stay static: SPIRAM_TRY_ALLOCATE_WIFI_LWIP puts them in PSRAM.)
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set

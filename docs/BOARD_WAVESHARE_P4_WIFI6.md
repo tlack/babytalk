@@ -45,29 +45,37 @@ parts on other pins (a lookalike, a revision) needs no rebuild:
 
 ## 3. Building for the P4
 
-`atomvm/build.sh` builds for the ESP32-S3. A P4 firmware takes the same components with
-these differences:
+```bash
+atomvm/build.sh esp32p4_pre_c6      # -> ~/build/atomvm-out-esp32p4_pre_c6/atomvm-babytalk.img
+esptool.py --chip esp32p4 write_flash 0x0 ~/build/atomvm-out-esp32p4_pre_c6/atomvm-babytalk.img \
+    0x490000 models/citrinet256_int4.mmrt
+```
 
-1. **Target** `esp32p4`, and AtomVM's own preset for a P4 with a C6 for WiFi:
-   `sdkconfig.defaults.esp32p4_pre_c6` (revision < 3 silicon) or `..._c6`, copied over
-   `sdkconfig.defaults.esp32p4`. AtomVM's CI does the same.
+Our board's chip is revision 1.3, so `esp32p4_pre_c6`; a board with v3.0 silicon takes
+`esp32p4_c6` (and an ESP-IDF that knows v3: 5.5.1 doesn't). What the script does
+differently from the S3 build:
+
+1. **Target** `esp32p4`, and AtomVM's own preset for a P4 with a C6 for WiFi
+   (`sdkconfig.defaults.esp32p4_pre_c6` or `..._c6`). AtomVM's CI does the same.
 2. **WiFi through the C6**: `components/avm_builtins/idf_component.yml.esp32p4_wifi_remote`
    copied to `idf_component.yml`, which brings `esp_wifi_remote` and `esp_hosted`. AtomVM's
    network module then works unchanged. (Our C6 shipped with esp_hosted firmware older than
    the host's 3.0.9; it runs in a compatibility mode.)
-3. AtomVM release-0.7 needs one patch on the P4: its GPIO deep-sleep hold NIFs call
-   functions ESP-IDF only declares on chips that have deep-sleep pad hold, and the P4 has none.
-   The guard needs `SOC_GPIO_SUPPORT_HOLD_IO_IN_DSLP && !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP`.
-4. **BabyTalk's settings**: the default board `CONFIG_BABYTALK_BOARD_WAVESHARE_P4_WIFI6=y`
-   (already the default on a P4; apps can pick another at run time), and the engines' 84.5 KB pool in PSRAM, `CONFIG_SRAM_POOL_IN_PSRAM=y`.
-   On the P4 only speech synthesis uses the pool, and it runs as fast from PSRAM. The internal
-   RAM goes to the recognizer's activations instead. Also set `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`
-   (sanoTTS's static buffers) and `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`.
+3. AtomVM v0.7 needs one patch on the P4 (`atomvm/patches/0003-...`): its GPIO deep-sleep
+   hold NIFs call functions ESP-IDF only declares on chips that have deep-sleep pad hold,
+   and the P4 has none. The guard needs
+   `SOC_GPIO_SUPPORT_HOLD_IO_IN_DSLP && !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP`.
+4. **BabyTalk's settings** (`atomvm/sdkconfig.babytalk.esp32p4`): the engines' 84.5 KB pool
+   in PSRAM, `CONFIG_SRAM_POOL_IN_PSRAM=y` (on the P4 only speech synthesis uses the pool,
+   and it runs as fast from PSRAM; the internal RAM goes to the recognizer's activations
+   instead), `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`, and PSRAM at 200 MHz (below). The
+   default audio board is `waveshare_p4_wifi6`; apps can pick another at run time.
 5. `atomvm_mmrt` (the `mmrt` module: matvec, matmul... over binaries) works on the P4 too, on
    its vector unit: 256x256 int8 matvec 267 MMAC/s, matmul with 16 rows 1640 MMAC/s, int4 564
    MMAC/s (the S3: 145, 720 and 466). `apps/mmrt_test` passes all 26 test vectors.
-6. The P4's bootloader goes at **0x2000** (the S3's at 0x0). With 32 MB of flash, use the S3
-   layout or a bigger one; the model partition is found by name (`model`).
+6. The P4's bootloader goes at **0x2000** (the S3's at 0x0); the image from `build.sh` starts
+   at 0x0 with it in place. The partition layout is the S3's (16 MB); with 32 MB of flash a
+   bigger one works too, as the model partition is found by name (`model`).
 
 ## 4. How fast (AtomVM, int4 model)
 
@@ -82,8 +90,9 @@ Measured with `apps/speed_bench`, PSRAM at **200 MHz** (see below):
 | speak 5.4 s of speech (nano voice) | **1.24 s (0.23 x real time)** | 0.27 x real time |
 | speak 5.2 s of speech (heart voice, 2.27M parameters) | 3.0 s (0.51-0.58 x real time) | (too slow: ~2x) |
 
-**Set the PSRAM to 200 MHz.** ESP-IDF 5.5 defaults the P4's PSRAM to 20 MHz, and files 200 MHz
-under experimental features: `CONFIG_IDF_EXPERIMENTAL_FEATURES=y` and `CONFIG_SPIRAM_SPEED_200M=y`.
+**PSRAM at 200 MHz** (`build.sh` sets it). ESP-IDF 5.5 defaults the P4's PSRAM to 20 MHz, and
+files 200 MHz under experimental features: `CONFIG_IDF_EXPERIMENTAL_FEATURES=y` and
+`CONFIG_SPIRAM_SPEED_200M=y` (`atomvm/sdkconfig.babytalk.esp32p4`).
 At 20 MHz the same firmware took 0.58 s for 2 s of speech; the model's weights and activations
 live in PSRAM.
 

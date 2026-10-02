@@ -55,12 +55,17 @@ but it hasn't run on a board yet.
 
 ## Quick start
 
-Needs ESP-IDF 5.5, Erlang/OTP 26+ and Elixir 1.17+ (for the `exatomvm` mix tasks).
+Needs ESP-IDF 5.5, Erlang/OTP 26+ and Elixir 1.17+ (for the `exatomvm` mix tasks). Optional:
+a sanoTTS checkout for text to speech ([Build and flash](#build-and-flash)).
 
 ```bash
-atomvm/build.sh                                   # -> ~/build/atomvm-out/atomvm-babytalk.img (ESP32-S3)
+atomvm/build.sh                                   # ESP32-S3 -> ~/build/atomvm-out/atomvm-babytalk.img
 esptool.py --chip esp32s3 write_flash 0x0 ~/build/atomvm-out/atomvm-babytalk.img \
     0x490000 models/citrinet256_int4.mmrt         # firmware + Erlang/Elixir libs, then the model
+
+atomvm/build.sh esp32p4_pre_c6                    # or an ESP32-P4 + C6 (Waveshare ESP32-P4-WIFI6)
+esptool.py --chip esp32p4 write_flash 0x0 ~/build/atomvm-out-esp32p4_pre_c6/atomvm-babytalk.img \
+    0x490000 models/citrinet256_int4.mmrt
 
 cd atomvm/apps/listen_demo && mix deps.get && mix atomvm.packbeam
 esptool.py --chip esp32s3 write_flash 0xA90000 listen_demo.avm
@@ -499,13 +504,33 @@ W = mmrt:pack({int8, Weights}, 64, 256),        % 64 outputs x 256 inputs
 
 ## Build and flash
 
-`build.sh` clones the pinned AtomVM tag into `~/build/atomvm` (`AVM_DIR`), applies
+```bash
+atomvm/build.sh [TARGET]          # or TARGET=... atomvm/build.sh
+```
+
+| `TARGET` | Chip | AtomVM tree / output (defaults) |
+|---|---|---|
+| `esp32s3` (default) | ESP32-S3, 16 MB flash, 8 MB octal PSRAM | `~/build/atomvm`, `~/build/atomvm-out` |
+| `esp32p4_pre_c6` | ESP32-P4 before silicon v3.0, ESP32-C6 for WiFi (the Waveshare ESP32-P4-WIFI6 we tested: v1.3) | `~/build/atomvm-<TARGET>`, `~/build/atomvm-out-<TARGET>` |
+| `esp32p4_c6` | ESP32-P4 v3.0 or later, ESP32-C6 for WiFi | same pattern |
+| `esp32p4_pre`, `esp32p4` | ESP32-P4 without WiFi (before / from v3.0) | same pattern |
+
+The P4 names are AtomVM's own presets. The boot log (or `esptool.py chip_id`) shows the
+chip's revision. ESP-IDF 5.5.1, which we build with, only builds for P4 silicon before v3.0:
+for a v3 chip, use a later 5.5 release. `AVM_DIR`, `OUT_DIR` and `IDF_PATH` override the
+locations.
+
+For every target, `build.sh` clones the pinned AtomVM tag (`AVM_DIR`), applies
 `patches/` (fixes to AtomVM itself: see [AtomVM patches](#atomvm-patches)), links in `components/` (ours and the shared `mmrt`, `sram_pool`, `stt_engine`,
 `sanotts` from the repo root), prepares the sanoTTS sources from a checkout (`SANOTTS_DIR`,
 default `~/build/tts/sanoTTS`; without one the firmware builds without text to speech, and
 `say` answers `{error, -4}`),
-applies `sdkconfig.babytalk` and builds. The Erlang/Elixir standard libraries (`boot.avm`)
-come from the official release image, so no host build of AtomVM is needed.
+applies AtomVM's preset for the target and our settings (`sdkconfig.babytalk`, plus
+`sdkconfig.babytalk.esp32s3` or `.esp32p4`, which ESP-IDF picks by chip), and builds. For a
+P4 with a C6 it adds AtomVM's `esp_wifi_remote` dependency, so WiFi works through the C6
+unchanged. The Erlang/Elixir standard libraries (`boot.avm`) come from AtomVM's release image
+for the same target, so no host build of AtomVM is needed. The result is one image to flash
+at 0x0 (the P4's bootloader sits at 0x2000 inside it).
 
 | Partition | Offset | Size | |
 |---|---|---|---|
@@ -520,29 +545,28 @@ If boards share a serial port, flash with `../tools/flash.sh` instead of esptool
 offset/file arguments, but it reads the chip's MAC first and refuses to write unless it
 matches the `mac` in `board.conf`.
 
-`build.sh` targets the ESP32-S3. Building for an **ESP32-P4** (with an ESP32-C6 for WiFi)
-takes a few changes: the target, AtomVM's P4 presets, a WiFi co-processor dependency, one
-AtomVM patch and a few BabyTalk settings. They're listed in
-[../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md), section 3.
+What the P4 build changes, and why: [../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md),
+section 3.
 
-Firmware options (`idf.py menuconfig`, or lines in `sdkconfig.babytalk`):
+Firmware options (`idf.py menuconfig`, or lines in `sdkconfig.babytalk*`):
 
 | Option | Default | |
 |---|---|---|
 | `CONFIG_BABYTALK_BOARD_*` | S3-CAM on an S3, P4-WIFI6 on a P4 | the board assumed until `audio_config/1`; `CUSTOM` for your own C driver |
 | `CONFIG_BABYTALK_RESERVE_AT_BOOT` | y | take the engines' 84.5 KB of internal RAM at boot (see `reserve_at_boot/1`) |
 | `CONFIG_BABYTALK_STACKS_IN_PSRAM` | n | the worker and audio task stacks (16 KB) in PSRAM, for boards short of internal RAM |
-| `CONFIG_SRAM_POOL_IN_PSRAM` | n | the engines' pool in PSRAM (right on the P4, where only synthesis uses it) |
+| `CONFIG_SRAM_POOL_IN_PSRAM` | n (y on the P4) | the engines' pool in PSRAM (right on the P4, where only synthesis uses it) |
 
 ### AtomVM patches
 
-`build.sh` applies these to the AtomVM checkout; an AtomVM build of BabyTalk made any other
-way needs them too.
+`build.sh` applies these to the AtomVM checkout (all of them, for every target); an AtomVM
+build of BabyTalk made any other way needs them too.
 
 | Patch | Fixes |
 |---|---|
 | `0001-i2c-resource-guard-whole-file.patch` | with AtomVM's I2C disabled, its old I2C driver was still compiled in, and ESP-IDF aborts when the old and new I2C drivers are both linked |
 | `0002-send-from-task-dead-pid-lock-leak.patch` | **a VM freeze.** A message from a native task (`globalcontext_send_message_from_task`) to a process that has just exited leaked the process table's read lock, and the next spawn or exit waited forever. BabyTalk's audio task hits this when a listener stops: its last `{babytalk_mic, Ref, stopped}` goes to the dead listener |
+| `0003-gpio-deep-sleep-hold-without-pad-hold.patch` | the P4 build: AtomVM's GPIO deep-sleep hold NIFs call functions ESP-IDF only declares on chips with deep-sleep pad hold, which the P4 lacks (no change on the S3) |
 
 ## Example apps
 

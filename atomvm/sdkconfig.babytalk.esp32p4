@@ -1,0 +1,16 @@
+# ESP32-P4 (atomvm/build.sh esp32p4_pre_c6 and the other P4 variants), measured on the
+# Waveshare ESP32-P4-WIFI6 (docs/BOARD_WAVESHARE_P4_WIFI6.md). Loaded by ESP-IDF after
+# sdkconfig.babytalk when the target is esp32p4; AtomVM's variant preset (silicon revision,
+# ESP32-C6 for WiFi or not) comes from build.sh.
+
+# The engines' 84.5 KB pool in PSRAM: on the P4 only speech synthesis uses it (on the S3 it is
+# the vector kernels' staging) and runs as fast from there; the internal RAM goes to the
+# recognizer's activations (2 s of speech: 835 ms with them internal, 916 in PSRAM)
+CONFIG_SRAM_POOL_IN_PSRAM=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+
+# PSRAM at 200 MHz (ESP-IDF 5.5's default on the P4 is 20 MHz, where 2 s of speech took 0.58 s
+# instead of 0.30): the model's weights and activations live there. 5.5 files 200 MHz under
+# experimental features.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM_SPEED_200M=y

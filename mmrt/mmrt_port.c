@@ -155,6 +155,14 @@ static void conv1x1_nc_frames(const int8_t *x, int C, const int8_t *w_nc, const 
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+// the second core's helper: near the top, unless speech is to yield to the VM (a screen board:
+// CONFIG_BABYTALK_YIELD -- the AtomVM schedulers' priority, taking turns with them)
+#ifdef CONFIG_BABYTALK_YIELD
+#define MMRT_HELPER_PRIORITY 1
+#else
+#define MMRT_HELPER_PRIORITY (configMAX_PRIORITIES - 2)
+#endif
+
 typedef void (*part_fn)(void *arg, int t0, int t1);
 static part_fn s_fn;
 static void *s_arg;
@@ -177,7 +185,7 @@ static void split_frames(part_fn fn, void *arg, int T)
     if (!s_go && T >= 2) {
         s_go = xSemaphoreCreateBinary();
         s_done = xSemaphoreCreateBinary();
-        if (!s_go || !s_done || xTaskCreatePinnedToCore(helper, "mmrt_w0", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0) != pdPASS)
+        if (!s_go || !s_done || xTaskCreatePinnedToCore(helper, "mmrt_w0", 4096, NULL, MMRT_HELPER_PRIORITY, NULL, 0) != pdPASS)
             s_go = NULL;
     }
     if (!s_go || T < 2 || xPortGetCoreID() == 0) {

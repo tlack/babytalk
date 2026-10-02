@@ -14,6 +14,14 @@
 #include "esp_heap_caps.h"
 #include "esp_cpu.h"
 
+// the second core's helper: near the top, unless speech is to yield to the VM (a screen board:
+// CONFIG_BABYTALK_YIELD -- the AtomVM schedulers' priority, taking turns with them)
+#ifdef CONFIG_BABYTALK_YIELD
+#define MMRT_HELPER_PRIORITY 1
+#else
+#define MMRT_HELPER_PRIORITY (configMAX_PRIORITIES - 2)
+#endif
+
 typedef struct {
     const uint8_t *bias_q;
     int c16m1;
@@ -105,7 +113,7 @@ static void ensure_worker(void)
     if (!s_go) {
         s_go = xSemaphoreCreateBinary();
         s_done = xSemaphoreCreateBinary();
-        xTaskCreatePinnedToCore(worker, "mmrt_w0", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0);
+        xTaskCreatePinnedToCore(worker, "mmrt_w0", 4096, NULL, MMRT_HELPER_PRIORITY, NULL, 0);
     }
 }
 

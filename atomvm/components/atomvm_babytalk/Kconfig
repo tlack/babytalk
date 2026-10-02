@@ -14,6 +14,18 @@ config BABYTALK_RESERVE_AT_BOOT
         babytalk:reserve_at_boot(true) (NVS namespace "babytalk", key "reserve") and a
         restart. The NVS value, when present, overrides this default either way.
 
+config BABYTALK_YIELD
+    bool "Speech work yields to the VM (a screen board)"
+    default n
+    depends on AVM_ENABLE_BABYTALK_NIFS
+    help
+        The speech engine's tasks (the worker, priority 5, and the kernels' helper on the
+        other core, near the top) run at the AtomVM schedulers' priority instead, taking turns
+        with them. Without it, a transcription or a wake-phrase window holds both cores and the
+        VM stops for its length -- on a board with a screen, the screen freezes while the room
+        is listened to. With it, the screen stays live and speech takes longer when the VM is
+        busy.
+
 config BABYTALK_STACKS_IN_PSRAM
     bool "BabyTalk's task stacks in PSRAM"
     default n

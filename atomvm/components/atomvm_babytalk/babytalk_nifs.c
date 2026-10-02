@@ -63,6 +63,14 @@
 #include "stt_engine.h"
 
 #define TAG "babytalk"
+// the speech work's task: above the AtomVM schedulers (priority 1), unless it's to yield to them
+// (CONFIG_BABYTALK_YIELD: a screen board -- its screen stays live while the wake phrase is
+// listened for; speech is slower when the VM's busy)
+#ifdef CONFIG_BABYTALK_YIELD
+#define WORKER_PRIORITY 1
+#else
+#define WORKER_PRIORITY 5
+#endif
 
 // AtomVM atom strings: length byte, then the name
 static const char *const A_BABYTALK = "\x08" "babytalk";
@@ -914,7 +922,7 @@ static void babytalk_init(GlobalContext *global)
     const UBaseType_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 #endif
     if (!s_jobs || !s_audio_go
-        || xTaskCreatePinnedToCoreWithCaps(worker, "babytalk", 12 * 1024, NULL, 5, NULL, 1, caps) != pdPASS
+        || xTaskCreatePinnedToCoreWithCaps(worker, "babytalk", 12 * 1024, NULL, WORKER_PRIORITY, NULL, 1, caps) != pdPASS
         || xTaskCreatePinnedToCoreWithCaps(audio_task, "babytalk_audio", 4 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) {
         ESP_LOGE(TAG, "could not start the babytalk tasks");
     }

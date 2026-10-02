@@ -43,7 +43,7 @@
 %% claimed and the next listener would get {error, busy} forever.
 -module(babytalk_listener).
 -behaviour(gen_server).
--export([start_link/1, start_link/2, stop/1, say/2, chime/2, chime/3, ask/3, wake_on/2, sentences/1]).
+-export([start_link/1, start_link/2, stop/1, say/2, chime/2, chime/3, ask/3, wake_on/2, hold/2, sentences/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(CUES, #{ready => [{587, 90}, {0, 30}, {880, 140}],      % D5 -> A5
@@ -67,7 +67,8 @@
              msg_kind = command, % command (after a wake) | answer (to ask/3)
              msg_fixed = none,   % none | ms: record exactly this long (ask/3's #{ms => _})
              phrase = none,      % none | spellings to install before the next wake phase
-             awaiting_reply = false}).  % a command was reported: a say/2 is its reply
+             awaiting_reply = false,    % a command was reported: a say/2 is its reply
+             held_until = 0}).          % no wake scoring before this (hold/2)
 
 start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
 start_link(Name, Opts) -> gen_server:start_link({local, Name}, ?MODULE, Opts, []).
@@ -90,6 +91,11 @@ ask(Server, Prompt, Opts) -> gen_server:cast(Server, {ask, iolist_to_binary(Prom
 
 %% Listen for a new wake phrase (spellings: binaries or strings); starts the wake loop.
 wake_on(Server, Spellings) -> gen_server:cast(Server, {wake_on, Spellings}).
+
+%% no wake-phrase scoring for the next Ms (the mic stays open; a question asked goes on as
+%% ever): someone's busy with the device -- typing on its screen, say -- and the engine's work
+%% would only take the cores from them. Each call sets it anew.
+hold(Server, Ms) -> gen_server:cast(Server, {hold, Ms}).
 
 init(Opts0) ->
     Opts = maps:merge(#{spellings => [], threshold => -21.0, window_ms => 4000, every_ms => 1000,
@@ -130,6 +136,8 @@ handle_cast({chime, Notes, Vol}, #st{phase = Phase} = St) ->
 handle_cast({ask, Prompt, Opts}, St) ->
     Then = {message, answer, maps:get(ms, Opts, none)},
     {noreply, output(says(Prompt) ++ [cue(wake)], Then, St#st{awaiting_reply = false})};
+handle_cast({hold, Ms}, St) when is_integer(Ms) ->
+    {noreply, St#st{held_until = now_ms() + Ms}};
 handle_cast({wake_on, Spellings}, St) ->
     {noreply, output([cue(ready)], wake, St#st{phrase = Spellings, awaiting_reply = false})};
 handle_cast(_Msg, St) -> {noreply, St}.
@@ -295,15 +303,21 @@ trim(Cs, B, Max) ->
 
 %% score the window about every every_ms, once it holds at least half of window_ms (and,
 %% with vad, only if something was heard since the last score)
-maybe_score(#st{sound = false, opts = #{vad := true}} = St) -> St;
-maybe_score(#st{scoring = none, win_bytes = B, last = Last,
+maybe_score(St) ->
+    case now_ms() < St#st.held_until of
+        true -> St;                                 % (held: hold/2)
+        false -> maybe_score1(St)
+    end.
+
+maybe_score1(#st{sound = false, opts = #{vad := true}} = St) -> St;
+maybe_score1(#st{scoring = none, win_bytes = B, last = Last,
                 opts = #{every_ms := E, window_ms := W}} = St) when B >= W * 16 ->
     Now = now_ms(),
     case Now - Last >= E andalso babytalk:transcribe(iolist_to_binary(lists:reverse(St#st.win))) of
         {ok, Ref} -> St#st{scoring = Ref, last = Now, sound = false};
         _ -> St
     end;
-maybe_score(St) -> St.
+maybe_score1(St) -> St.
 
 scored({ok, Text, Info}, #st{phase = wake, opts = #{threshold := Thr}} = St) ->
     Score = proplists:get_value(score, Info),

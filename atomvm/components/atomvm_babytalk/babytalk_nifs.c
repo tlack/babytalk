@@ -68,7 +68,7 @@
 static const char *const A_BABYTALK = "\x08" "babytalk";
 static const char *const A_BABYTALK_MIC = "\x0C" "babytalk_mic";
 static const char *const A_BABYTALK_PLAY = "\x0D" "babytalk_play";
-static const char *const A_BABYTALK_AUDIO = "\x0E" "babytalk_audio";
+static const char *const A_BABYTALK_AUDIO __attribute__((unused)) = "\x0E" "babytalk_audio";   // (unused on a custom board: no run-time audio config)
 static const char *const A_PHONEMES = "\x08" "phonemes";
 static const char *const A_G2P_MS = "\x06" "g2p_ms";
 static const char *const A_SYNTH_MS = "\x08" "synth_ms";

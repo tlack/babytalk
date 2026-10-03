@@ -55,10 +55,14 @@ but it hasn't run on a board yet.
 
 ## Quick start
 
-Needs ESP-IDF 5.5, Erlang/OTP 26+ and Elixir 1.17+ (for the `exatomvm` mix tasks). Optional:
-a sanoTTS checkout for text to speech ([Build and flash](#build-and-flash)).
+Needs ESP-IDF 5.5, Erlang/OTP 26+ and Elixir 1.17+ (for the `exatomvm` mix tasks).
 
 ```bash
+# optional, for text to speech: sanoTTS at the commit we audited (build.sh refuses any other).
+# Without it the firmware has speech to text only, and babytalk:say/1 returns {error, -4}.
+git clone https://github.com/Ampixa/sanoTTS ~/build/tts/sanoTTS     # or anywhere: SANOTTS_DIR=...
+git -C ~/build/tts/sanoTTS checkout 18e26b2b365bff41d211e516b0760021451438f1
+
 atomvm/build.sh                                   # ESP32-S3 -> ~/build/atomvm-out/atomvm-babytalk.img
 esptool.py --chip esp32s3 write_flash 0x0 ~/build/atomvm-out/atomvm-babytalk.img \
     0x490000 models/citrinet256_int4.mmrt         # firmware + Erlang/Elixir libs, then the model
@@ -72,6 +76,9 @@ esptool.py --chip esp32s3 write_flash 0xA90000 listen_demo.avm
 ```
 
 Say "wake up tomato face", wait for the second chime, say something short.
+
+A firmware image with text to speech should be treated as GPL-3.0 if you distribute it: three
+sanoTTS files carry no licence ([../components/sanotts/LICENSES.md](../components/sanotts/LICENSES.md)).
 
 **In your own app**, compile the library sources along with yours. With Mix + exatomvm:
 

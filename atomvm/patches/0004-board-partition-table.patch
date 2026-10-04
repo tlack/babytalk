@@ -1,0 +1,15 @@
+diff --git a/src/platforms/esp32/CMakeLists.txt b/src/platforms/esp32/CMakeLists.txt
+index 2e2a86b2..c5d2bf59 100644
+--- a/src/platforms/esp32/CMakeLists.txt
++++ b/src/platforms/esp32/CMakeLists.txt
+@@ -69,7 +69,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig")
+     endif()
+ endif()
+ 
+-if (_jit_partition)
++if (DEFINED AVM_PARTITION_TABLE_FILENAME)
++    # a board build brings its own table (-D AVM_PARTITION_TABLE_FILENAME=...)
++elseif (_jit_partition)
+     # JIT partition layout: fully AOT boot.avm (estdlib + esp32init, no JIT compiler)
+     set(AVM_PARTITION_TABLE_FILENAME "partitions-jit.csv")
+ elseif (ATOMVM_ELIXIR_SUPPORT)

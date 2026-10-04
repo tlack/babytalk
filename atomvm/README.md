@@ -2,7 +2,7 @@
 
 On-device speech to text, text to speech, a wake phrase, microphone and speaker, plus the
 int8/int4 vector kernels underneath, for [AtomVM](https://github.com/atomvm/AtomVM)
-**v0.7.0-alpha.1** on the ESP32-S3 and the ESP32-P4. Everything runs on the board: no cloud,
+**v0.7.0-beta.0** on the ESP32-S3 and the ESP32-P4. Everything runs on the board: no cloud,
 no network needed (WiFi is only for the test tools).
 
 ```erlang
@@ -517,13 +517,14 @@ atomvm/build.sh [TARGET]          # or TARGET=... atomvm/build.sh
 
 | `TARGET` | Chip | AtomVM tree / output (defaults) |
 |---|---|---|
-| `esp32s3` (default) | ESP32-S3, 16 MB flash, 8 MB octal PSRAM | `~/build/atomvm`, `~/build/atomvm-out` |
-| `esp32p4_pre_c6` | ESP32-P4 before silicon v3.0, ESP32-C6 for WiFi (the Waveshare ESP32-P4-WIFI6 we tested: v1.3) | `~/build/atomvm-<TARGET>`, `~/build/atomvm-out-<TARGET>` |
+| `esp32s3` (default) | ESP32-S3, 16 MB flash, 8 MB octal PSRAM | `~/build/atomvm-<tag>`, `~/build/atomvm-out` |
+| `esp32p4_pre_c6` | ESP32-P4 before silicon v3.0, ESP32-C6 for WiFi (the Waveshare ESP32-P4-WIFI6 we tested: v1.3) | `~/build/atomvm-<tag>-<TARGET>`, `~/build/atomvm-out-<TARGET>` |
 | `esp32p4_c6` | ESP32-P4 v3.0 or later, ESP32-C6 for WiFi | same pattern |
 | `esp32p4_pre`, `esp32p4` | ESP32-P4 without WiFi (before / from v3.0) | same pattern |
 
 The P4 names are AtomVM's own presets. The boot log (or `esptool.py chip_id`) shows the
-chip's revision. ESP-IDF 5.5.1, which we build with, only builds for P4 silicon before v3.0:
+chip's revision. `<tag>` is the pinned AtomVM release (`v0.7.0-beta.0`; another with
+`AVM_TAG`, if `patches/` still apply to it). ESP-IDF 5.5.1, which we build with, only builds for P4 silicon before v3.0:
 for a v3 chip, use a later 5.5 release. `AVM_DIR`, `OUT_DIR` and `IDF_PATH` override the
 locations.
 
@@ -574,6 +575,7 @@ build of BabyTalk made any other way needs them too.
 | `0001-i2c-resource-guard-whole-file.patch` | with AtomVM's I2C disabled, its old I2C driver was still compiled in, and ESP-IDF aborts when the old and new I2C drivers are both linked |
 | `0002-send-from-task-dead-pid-lock-leak.patch` | **a VM freeze.** A message from a native task (`globalcontext_send_message_from_task`) to a process that has just exited leaked the process table's read lock, and the next spawn or exit waited forever. BabyTalk's audio task hits this when a listener stops: its last `{babytalk_mic, Ref, stopped}` goes to the dead listener |
 | `0003-gpio-deep-sleep-hold-without-pad-hold.patch` | the P4 build: AtomVM's GPIO deep-sleep hold NIFs call functions ESP-IDF only declares on chips with deep-sleep pad hold, which the P4 lacks (no change on the S3) |
+| `0004-board-partition-table.patch` | since v0.7.0-beta.0 AtomVM's build writes its own partition table into `sdkconfig`; this lets a build bring its own (`build.sh` passes `-D AVM_PARTITION_TABLE_FILENAME=partitions-babytalk.csv`) |
 
 ## Example apps
 
@@ -629,7 +631,7 @@ internal RAM free at boot, ~227 KB online. Details:
 
 ## Risks and limits
 
-AtomVM v0.7 is an alpha (the project recommends v0.6 for production). While a transcription
+AtomVM v0.7 is still a pre-release (beta.0; the project recommends v0.6 for production). While a transcription
 runs, MMRT keeps both cores busy (its helper task on core 0), so Erlang code and WiFi respond
 more slowly for those ~0.2 s per second of audio. The mic and the speaker take turns (one
 I2S port), so the board can't hear you while it talks. The end of a message is found by

@@ -63,6 +63,13 @@
 #include "stt_engine.h"
 
 #define TAG "babytalk"
+
+// Heap words for a reference made from ref ticks (AtomVM v0.7.0-beta.0 renamed REF_SIZE)
+#ifdef TERM_BOXED_REFERENCE_SHORT_SIZE
+#define REF_WORDS TERM_BOXED_REFERENCE_SHORT_SIZE
+#else
+#define REF_WORDS REF_SIZE
+#endif
 // the speech work's task: above the AtomVM schedulers (priority 1), unless it's to yield to them
 // (CONFIG_BABYTALK_YIELD: a screen board -- its screen stays live while the wake phrase is
 // listened for; speech is slower when the VM's busy)
@@ -160,7 +167,7 @@ static void send_msg(const job_t *j, Heap *heap, term result)
     globalcontext_send_message_from_task(g, j->pid, NormalMessage, msg);
     memory_destroy_heap(heap, g);
 }
-#define MSG_WORDS (TUPLE_SIZE(3) + REF_SIZE)
+#define MSG_WORDS (TUPLE_SIZE(3) + REF_WORDS)
 
 // Result: {ok, Text, Info} | {error, Code}
 static void send_transcript(const job_t *j, int rc, const stt_result_t *r)
@@ -297,7 +304,7 @@ static void send_audio(int32_t pid, uint64_t ref, const char *tag, size_t extra_
 {
     GlobalContext *g = s_glb;
     Heap heap;
-    if (UNLIKELY(memory_init_heap(&heap, TUPLE_SIZE(3) + REF_SIZE + extra_words) != MEMORY_GC_OK)) {
+    if (UNLIKELY(memory_init_heap(&heap, TUPLE_SIZE(3) + REF_WORDS + extra_words) != MEMORY_GC_OK)) {
         ESP_LOGE(TAG, "no memory for an audio message");
         return;
     }
@@ -404,7 +411,7 @@ static term nif_transcribe(Context *ctx, int argc, term argv[])
     VALIDATE_VALUE(argv[0], term_is_binary);
     const size_t bytes = term_binary_size(argv[0]);
     if (bytes < 2 || bytes % 2) RAISE_ERROR(BADARG_ATOM);
-    if (UNLIKELY(memory_ensure_free_with_roots(ctx, TUPLE_SIZE(2) + REF_SIZE, argc, argv, MEMORY_CAN_SHRINK) != MEMORY_GC_OK)) {
+    if (UNLIKELY(memory_ensure_free_with_roots(ctx, TUPLE_SIZE(2) + REF_WORDS, argc, argv, MEMORY_CAN_SHRINK) != MEMORY_GC_OK)) {
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
     if (!lock_engine()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
@@ -425,7 +432,7 @@ static term nif_listen(Context *ctx, int argc, term argv[])
     VALIDATE_VALUE(argv[0], term_is_integer);
     const avm_int_t ms = term_to_int(argv[0]);
     if (ms < 20 || ms > 10000) RAISE_ERROR(BADARG_ATOM);
-    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_SIZE) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_WORDS) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
     s_aj.kind = AUDIO_LISTEN;
     s_aj.pid = ctx->process_id;
@@ -467,7 +474,7 @@ static term nif_play(Context *ctx, int argc, term argv[])
     const size_t bytes = term_binary_size(argv[0]);
     const avm_int_t rate = term_to_int(argv[1]), vol = term_to_int(argv[2]);
     if (bytes < 2 || bytes % 2 || rate < 8000 || rate > 48000 || vol < 0 || vol > 100) RAISE_ERROR(BADARG_ATOM);
-    if (UNLIKELY(memory_ensure_free_with_roots(ctx, TUPLE_SIZE(2) + REF_SIZE, argc, argv, MEMORY_CAN_SHRINK) != MEMORY_GC_OK)) {
+    if (UNLIKELY(memory_ensure_free_with_roots(ctx, TUPLE_SIZE(2) + REF_WORDS, argc, argv, MEMORY_CAN_SHRINK) != MEMORY_GC_OK)) {
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
     if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
@@ -518,7 +525,7 @@ static term nif_tones(Context *ctx, int argc, term argv[])
         total_ms += ms[n++];
     }
     if (n == 0 || total_ms > TONE_MAX_MS || vol < 0 || vol > 100) RAISE_ERROR(BADARG_ATOM);
-    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_SIZE) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_WORDS) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     if (!claim_audio()) return error_tuple(&ctx->heap, atom(ctx->global, A_BUSY));
     const int samples = total_ms * TONE_RATE / 1000;
     int16_t *pcm = heap_caps_malloc((size_t) samples * 2, MALLOC_CAP_SPIRAM);
@@ -579,7 +586,7 @@ static term nif_say(Context *ctx, int argc, term argv[])
         free(text);
         RAISE_ERROR(BADARG_ATOM);
     }
-    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_SIZE) != MEMORY_GC_OK)) {
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) + REF_WORDS) != MEMORY_GC_OK)) {
         free(text);
         RAISE_ERROR(OUT_OF_MEMORY_ATOM);
     }
@@ -675,7 +682,7 @@ static term nif_audio_config(Context *ctx, int argc, term argv[])
         VALIDATE_VALUE(e, term_is_integer);
         v[i] = term_to_int(e);
     }
-    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) * 2 + REF_SIZE) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(2) * 2 + REF_WORDS) != MEMORY_GC_OK)) RAISE_ERROR(OUT_OF_MEMORY_ATOM);
 #ifdef CONFIG_BABYTALK_BOARD_CUSTOM
     UNUSED(v);
     return error_tuple(&ctx->heap, atom(ctx->global, "\x0C" "custom_board"));

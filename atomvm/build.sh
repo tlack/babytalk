@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build AtomVM v0.7.0-alpha.1 with the BabyTalk components, for an ESP32-S3 or an ESP32-P4.
+# Build AtomVM v0.7.0-beta.0 with the BabyTalk components, for an ESP32-S3 or an ESP32-P4.
 #
 #   atomvm/build.sh [TARGET]      (or TARGET=... atomvm/build.sh)
 #
@@ -11,27 +11,27 @@
 # (the P4 names are AtomVM's own presets; esptool and the boot log show the chip's revision)
 #
 # -> $OUT/atomvm-babytalk.img (flash at 0x0: bootloader, partition table, AtomVM, boot.avm).
-# AVM_DIR holds an AtomVM checkout at the pinned tag (default ~/build/atomvm for the S3,
-# ~/build/atomvm-<TARGET> otherwise: one tree per target, as switching rebuilds everything);
+# AVM_DIR holds an AtomVM checkout at the pinned tag (default ~/build/atomvm-<tag>[-<TARGET>]:
+# one tree per release and target, as switching either rebuilds everything);
 # OUT_DIR the results (default ~/build/atomvm-out, ~/build/atomvm-out-<TARGET>); IDF_PATH an
 # ESP-IDF 5.5 tree. The Erlang/Elixir boot libraries (boot.avm) come from AtomVM's release
 # image for the same target, so no host build of AtomVM (and no gperf) is needed.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-TAG=v0.7.0-alpha.1
+TAG="${AVM_TAG:-v0.7.0-beta.0}"    # AVM_TAG: another AtomVM release (patches/ must still apply)
 TARGET="${1:-${TARGET:-esp32s3}}"
 case "$TARGET" in
     esp32s3) CHIP=esp32s3; SUFFIX="" ;;
     esp32p4|esp32p4_pre|esp32p4_c6|esp32p4_pre_c6) CHIP=esp32p4; SUFFIX="-$TARGET" ;;
     *) echo "unknown target '$TARGET': esp32s3, esp32p4_pre_c6, esp32p4_c6, esp32p4_pre or esp32p4" >&2; exit 2 ;;
 esac
-AVM="${AVM_DIR:-$HOME/build/atomvm$SUFFIX}"
+AVM="${AVM_DIR:-$HOME/build/atomvm-$TAG$SUFFIX}"
 OUT="${OUT_DIR:-$HOME/build/atomvm-out$SUFFIX}"
 export IDF_PATH="${IDF_PATH:-$HOME/build/lvgl_micropython/lib/esp-idf}"
 . "$IDF_PATH/export.sh" >/dev/null
 
 [ -d "$AVM" ] || git clone --depth 1 --branch "$TAG" https://github.com/atomvm/AtomVM.git "$AVM"
-[ "$(git -C "$AVM" describe --tags)" = "$TAG" ] || { echo "$AVM is not at $TAG"; exit 1; }
+[ "$(git -C "$AVM" describe --tags)" = "$TAG" ] || { echo "$AVM is not at $TAG (set AVM_DIR to another directory)"; exit 1; }
 
 # Local fixes to AtomVM (atomvm/patches; atomvm/README.md, "AtomVM patches"), applied once
 for p in "$HERE"/patches/*.patch; do
@@ -42,7 +42,9 @@ E="$AVM/src/platforms/esp32"
 for c in "$HERE"/components/*/; do ln -sfn "$c" "$E/components/$(basename "$c")"; done
 # Engine components shared with the MicroPython firmware (repo-root components/)
 for c in mmrt sram_pool stt_engine sanotts; do ln -sfn "$HERE/../components/$c" "$E/components/$c"; done
-cp "$HERE/partitions-babytalk.csv" "$E/"
+# Our partition table (AtomVM's CMakeLists would otherwise impose its own: patches/0004)
+TABLE=partitions-babytalk.csv
+cp "$HERE/$TABLE" "$E/"
 if [ "$CHIP" = esp32p4 ]; then
     # AtomVM's own recipe (its CI): the variant's preset, and for a C6 co-processor
     # esp_wifi_remote (bringing esp_hosted), so AtomVM's network driver reaches the C6's WiFi
@@ -63,7 +65,7 @@ cd "$E"
 stamp="$(echo "$TARGET" | cat - "$HERE"/sdkconfig.babytalk* | sha1sum | cut -c1-12)"
 if [ ! -f sdkconfig ] || [ "$(cat .babytalk-overlay 2>/dev/null)" != "$stamp" ]; then
     rm -f sdkconfig
-    idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" set-target "$CHIP"
+    idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" -D AVM_PARTITION_TABLE_FILENAME="$TABLE" set-target "$CHIP"
     echo "$stamp" > .babytalk-overlay
 fi
 # Text to speech: sanoTTS sources (github.com/Ampixa/sanoTTS) copied and patched; its static
@@ -76,7 +78,7 @@ case $rc in
     1) echo "no sanoTTS checkout: building without text to speech (babytalk:say/1 will return {error, -4})" >&2 ;;
     *) exit $rc ;;                                   # wrong sanoTTS commit
 esac
-idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" "${TTS_ARGS[@]}" build
+idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" -D AVM_PARTITION_TABLE_FILENAME="$TABLE" "${TTS_ARGS[@]}" build
 
 # boot.avm: the Erlang + Elixir standard libraries, cut from AtomVM's release image for this
 # target (where that image's own partition table puts boot.avm)

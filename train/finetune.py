@@ -4,6 +4,10 @@ the captured noise beds and other damage mixed in on the fly.
 
     uv run finetune.py --steps 4000                  # -> data/train/runs/<stamp>/model.pt
     uv run finetune.py --steps 200 --eval-every 100  # quick smoke test
+    uv run finetune.py --device cpu                  # no GPU: works, but ~1.5 days instead of ~15 min
+
+--device: auto (the default: an NVIDIA GPU if there is one, else Apple's GPU, else the CPU),
+cuda, mps or cpu.
 
 Score the result on the held-out field recordings:
     cd ../export && uv run field_eval.py --float-ckpt ../data/train/runs/<stamp>/model.pt
@@ -233,11 +237,19 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt-every", type=int, default=500, help="resumable checkpoint interval (steps)")
     ap.add_argument("--resume", help="a run directory to continue from its last checkpoint (ckpt.pt)")
+    ap.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"],
+                    help="where to train (auto: cuda, else mps, else cpu)")
     a = ap.parse_args()
 
-    dev = "cuda"
+    dev = a.device
+    if dev == "auto":
+        dev = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    print("device:", dev)
     torch.manual_seed(a.seed)
-    torch.set_num_threads(2)            # CPU work here is small; default = all cores, which thrashes
+    if dev != "cpu":
+        torch.set_num_threads(2)        # CPU work is small next to a GPU; all cores would thrash
+    # (on the CPU, torch's default -- all cores -- trains; the data workers share them)
+    ctc_dev = "cpu" if dev == "mps" else dev   # PyTorch has no CTC loss on Apple's GPU
     m, feat, vocab, cfg = load_model()
     m.to(dev)
     wp = WordPiece(vocab)
@@ -293,7 +305,8 @@ def main():
         x = spec_augment(x, lens, rng).to(dev, non_blocking=True)
         lg, olens = m(x, lens.to(dev))      # fp32: bf16 autocast measured slower on this model
         lp = F.log_softmax(lg.float(), dim=1).permute(2, 0, 1)
-        loss = F.ctc_loss(lp, tg.to(dev), olens, tl.to(dev), blank=len(vocab), zero_infinity=True)
+        loss = F.ctc_loss(lp.to(ctc_dev), tg.to(ctc_dev), olens.to(ctc_dev), tl.to(ctc_dev), blank=len(vocab),
+                          zero_infinity=True)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)

@@ -59,7 +59,8 @@ stay the same, so **the result is just another `.mmrt` file: no firmware change*
    `field/prompts.py` (audiobooks, news, Wikipedia, Hacker News, your own
    `field/terms.txt`). A fifth of the sentences are held out for testing.
 2. **Fine-tune** on the PC: `train/make_tts.py` (synthetic speech of the training sentences),
-   then `train/finetune.py` (~15 minutes on a laptop GPU; mixes audiobooks, synthetic speech
+   then `train/finetune.py` (~15 minutes on a laptop GPU, ~1.5 days on its 24-thread CPU with
+   `--device cpu`; Apple's GPU: `--device mps`, untested; mixes audiobooks, synthetic speech
    and your recordings, with recorded noise added). Blending with the original weights trades
    noisy-room accuracy against clean-speech accuracy. The result is a PyTorch checkpoint.
 3. **Score** it before converting: `export/field_eval.py --float-ckpt <checkpoint>`.

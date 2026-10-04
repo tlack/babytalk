@@ -301,7 +301,8 @@ A fifth of the sentences are reserved for testing and never used in training.
 `export/hard_words.py` keeps a running list of the words the model gets wrong, and the
 recorder can target them (`--hard`) or redo the sentences it missed (`--retake`).
 
-**Training** (`train/finetune.py`, ~15 minutes on a laptop GPU): the model keeps learning
+**Training** (`train/finetune.py`, ~15 minutes on a laptop GPU; without one `--device cpu`
+works but takes ~1.5 days): the model keeps learning
 from 100 hours of audiobooks, plus synthetic speech of modern text and the field
 recordings, with the recorded background noise and other damage (muffling, clipping,
 dropouts) mixed in. Blending the fine-tuned weights with the original ones lets us choose
@@ -323,7 +324,7 @@ still need to be rebuilt from it.
 cd field && uv run prompts.py                                   # build the sentence pool
 uv run capture.py --condition truck-idle --noise "diesel idling"   # a recording session
 cd ../export && uv run field_eval.py --split all                # score the models
-cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune on the GPU
+cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune (GPU if present; --device cpu|mps|cuda)
 ```
 
 ## BabyTalk for AtomVM (Erlang / Elixir)

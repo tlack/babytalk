@@ -1,7 +1,7 @@
 [project]
 name = "train"
 version = "0.1.0"
-description = "Fine-tune the speech model on the GPU (field recordings, noise, TTS)"
+description = "Fine-tune the speech model (field recordings, noise, TTS); a GPU makes it minutes instead of hours"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "torch>=2.8",
@@ -19,4 +19,5 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+# CUDA 12.8 builds on Linux and Windows (they run on the CPU too); macOS takes PyPI's (Apple GPU: --device mps)
+torch = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]

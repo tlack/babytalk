@@ -1,4 +1,9 @@
 %{
-  "exatomvm": {:git, "https://github.com/atomvm/exatomvm.git", "7802373f107d0b83e36206bb06bb1ed1bb43ac90", []},
+  "atomvm": {:hex, :atomvm, "0.7.0-beta.0", "32325caa6882e3936817f0161bf2c55071cd990beef2a78d36e659576e931c8d", [:rebar3], [], "hexpm", "2244e40b11ba1231afed7c94c6ff158a6d394b72a4715fa313b941904ab8dc43"},
+  "cc_precompiler": {:hex, :cc_precompiler, "0.1.11", "8c844d0b9fb98a3edea067f94f616b3f6b29b959b6b3bf25fee94ffe34364768", [:mix], [{:elixir_make, "~> 0.7", [hex: :elixir_make, repo: "hexpm", optional: false]}], "hexpm", "3427232caf0835f94680e5bcf082408a70b48ad68a5f5c0b02a3bea9f3a075b9"},
+  "elixir_make": {:hex, :elixir_make, "0.10.0", "16577e2583a79bb79237bbff349619ef5d80afffc07eac6e4faf0d00e2ddaf7d", [:mix], [], "hexpm", "dc1f09fb7fa68866b886abd5f0f3c83553b1a19a52359a899e92af1bb3b31982"},
+  "exatomvm": {:git, "https://github.com/atomvm/exatomvm.git", "a99323a1054adda1ec00e9997bc41bc7317a3826", []},
+  "fine": {:hex, :fine, "0.1.6", "4bf7151493443c454aac9f2fa2f34f5fefd0346a83fb5586a016c4a135c63247", [:mix], [], "hexpm", "5638eb4495488e885ebec167fa57973e5c35e1a50c344eb7666c90ec1c4e3b12"},
+  "pythonx": {:hex, :pythonx, "0.4.10", "7c3377f07b15f30e51a364a92b5a456a9bbbc9a555b855e09acf551b3f36abed", [:make, :mix], [{:cc_precompiler, "~> 0.1", [hex: :cc_precompiler, repo: "hexpm", optional: false]}, {:elixir_make, "~> 0.9", [hex: :elixir_make, repo: "hexpm", optional: false]}, {:fine, "~> 0.1.2", [hex: :fine, repo: "hexpm", optional: false]}, {:flame, "~> 0.5", [hex: :flame, repo: "hexpm", optional: true]}], "hexpm", "7b7bb0728e4b69c362a8c0c93953ac44b10a51b21a864f2a0801155a3d8989a4"},
   "uf2tool": {:hex, :uf2tool, "1.1.0", "7091931234ca5a256b66ea691983867d51229798622d083f85c1ad779798a734", [:rebar3], [], "hexpm", "1a7e5ca7ef3d19c7a0b0acf3db804b3188e0980884acffa13fd57d733507b73d"},
 }

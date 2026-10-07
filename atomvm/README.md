@@ -21,9 +21,10 @@ W = mmrt:pack({int8, Weights}, 64, 256),                      % 64 x 256 matrix,
 ```
 
 **Contents:** [What's here](#whats-here) · [Quick start](#quick-start) ·
+[From Elixir](#from-elixir) ·
 [Boards and pins](#boards-and-pins) · [OTP structure](#otp-structure) ·
 [API reference](#api-reference): [`babytalk`](#babytalk--babytalk),
-[`babytalk_listener`](#babytalk_listener), [`mmrt`](#mmrt--mmrt), [errors](#error-reference) ·
+[`babytalk_listener`](#babytalk_listener--babytalklistener), [`mmrt`](#mmrt--mmrt), [errors](#error-reference) ·
 [Build and flash](#build-and-flash) · [Example apps](#example-apps) · [Measured](#measured) ·
 [AtomVM lessons](#things-we-learned-atomvm-specifics) · [Risks and limits](#risks-and-limits)
 
@@ -34,7 +35,7 @@ Two libraries, usable separately:
 | | What | Modules | Needs |
 |---|---|---|---|
 | **MMRT** | int8/int4 matvec, matmul, dot, requant, top-k... on the chip's SIMD unit | `mmrt` / `MMRT` | an ESP32-S3 or ESP32-P4 |
-| **BabyTalk** | speech to text, text to speech, wake phrase, mic + speaker, a conversation `gen_server` | `babytalk`, `babytalk_listener` / `BabyTalk` | the `model` partition; a board with supported audio chips ([Boards and pins](#boards-and-pins)) |
+| **BabyTalk** | speech to text, text to speech, wake phrase, mic + speaker, a conversation `gen_server` | `babytalk`, `babytalk_listener` / `BabyTalk`, `BabyTalk.Listener` | the `model` partition; a board with supported audio chips ([Boards and pins](#boards-and-pins)) |
 
 | Where | What |
 |---|---|
@@ -93,14 +94,97 @@ sanoTTS files carry no licence ([../components/sanotts/LICENSES.md](../component
 def project do
   [app: :my_app, version: "0.1.0", elixir: "~> 1.17",
    erlc_paths: ["src", "path/to/atomvm/lib/babytalk/src"],        # + lib/mmrt/src for MMRT
-   elixirc_paths: ["lib", "path/to/atomvm/lib/babytalk/lib"],     # only for the Elixir wrappers
-   deps: [{:exatomvm, git: "https://github.com/atomvm/exatomvm.git", runtime: false}],
+   # the Elixir wrappers; an absolute path (Mix won't compile .ex files from a relative
+   # path outside the project)
+   elixirc_paths: ["lib", Path.expand("path/to/atomvm/lib/babytalk/lib", __DIR__)],
+   deps: [{:exatomvm, git: "https://github.com/atomvm/exatomvm.git", runtime: false},
+          {:atomvm, "~> 0.7.0-beta.0", runtime: false}],   # the release's API, to check against
    atomvm: [start: :my_app, flash_offset: 0xA90000]]
 end
 ```
 
 The NIFs are compiled into the firmware; the `.erl` files give them names and types and hold
 the Erlang-side logic (the listener, the configuration maps).
+
+## From Elixir
+
+Every Erlang module has an Elixir wrapper that delegates to it one for one: `BabyTalk`
+(`:babytalk`), `BabyTalk.Listener` (`:babytalk_listener`) and `MMRT` (`:mmrt`). Arguments,
+results and messages are the same as in the [API reference](#api-reference), with Elixir
+syntax: Erlang's `<<"text">>` is `"text"`, and atoms get a colon (`{:ok, text, info}`).
+
+```elixir
+# Record 3 s, transcribe it, say it back
+:ok = BabyTalk.audio_config(:waveshare_s3_cam)          # or a map of your own pins
+{:ok, pcm} = BabyTalk.record(3)
+{:ok, text, info} = BabyTalk.transcribe_sync(pcm, 10_000)
+IO.puts("heard: " <> text <> " in #{info[:model_ms]} ms")
+:ok = BabyTalk.speak(["You said: ", text])
+
+# Asynchronous: the result arrives as a message
+{:ok, ref} = BabyTalk.transcribe(pcm)
+receive do
+  {:babytalk, ^ref, {:ok, text, _info}} -> text
+  {:babytalk, ^ref, {:error, code}} -> {:error, code}
+end
+
+# Stream the mic in 250 ms chunks
+{:ok, ref} = BabyTalk.listen(250)
+receive do
+  {:babytalk_mic, ^ref, chunk} -> IO.puts("level #{BabyTalk.rms(chunk)}")
+end
+BabyTalk.stop_listening()
+
+# A chime: {Hz, ms} notes, volume 70
+{:ok, ref} = BabyTalk.tones([{587, 90}, {0, 30}, {880, 140}], 70)
+receive do
+  {:babytalk_play, ^ref, :done} -> :ok
+end
+```
+
+**A voice assistant under a supervisor.** `BabyTalk.Listener` has a `child_spec/1`, so it
+goes straight into a children list. It registers itself as `:babytalk_listener`; its events go
+to `notify`:
+
+```elixir
+defmodule MyApp.Responder do
+  use GenServer
+  def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
+  def init(nil), do: {:ok, nil}
+  def handle_call(_req, _from, s), do: {:reply, :ok, s}    # see "Elixir on AtomVM" below
+  def handle_cast(_req, s), do: {:noreply, s}
+
+  def handle_info({:babytalk_listener, {:command, text}}, s) do
+    BabyTalk.Listener.say(:babytalk_listener, ["You said: ", text])
+    {:noreply, s}
+  end
+  def handle_info({:babytalk_listener, _event}, s), do: {:noreply, s}
+end
+
+children = [
+  MyApp.Responder,
+  {BabyTalk.Listener, %{notify: MyApp.Responder, spellings: ["hey computer"], threshold: -21.0}}
+]
+Supervisor.start_link(children, strategy: :rest_for_one)
+```
+
+The whole app, with a few commands: [`apps/voice_commands`](apps/voice_commands).
+
+**MMRT** from Elixir:
+
+```elixir
+w = MMRT.pack({:int8, weights}, 64, 256)          # 64 outputs x 256 inputs, packed once
+{:int8, h} = MMRT.matvec(w, {:int8, x}, 7)
+[{best, _score} | _] = MMRT.top_k({:int8, h}, 3)
+```
+
+**Elixir on AtomVM.** AtomVM runs a subset of Elixir's standard library (`exavmlib`):
+`Enum`, `Map`, `Keyword`, `List`, `IO`, `GenServer`, `Supervisor` and string interpolation are
+there; **`String` is not**. Match text with `:binary` (`:binary.match(text, "lights") !=
+:nomatch`, `:binary.split/2`). And `use GenServer` compiles in default `handle_call/3` and
+`handle_cast/2` that call `:erlang.phash2/2`, which AtomVM lacks: define both yourself, as
+above. `mix atomvm.packbeam` warns about calls the release doesn't have; take the warnings
+seriously.
 
 ## Boards and pins
 
@@ -188,7 +272,7 @@ so a wrong pin or address shows immediately:
 | `{error, custom_board}` | this firmware has its own C driver (below) |
 
 In an OTP app, put the board in the listener's options instead (`audio => ...`, see
-[`babytalk_listener`](#babytalk_listener)); it's applied before the listener first listens,
+[`babytalk_listener`](#babytalk_listener--babytalklistener)); it's applied before the listener first listens,
 and a failure stops the listener with `{audio_config, Reason}`.
 
 **Finding your pins.** The board's schematic or vendor BSP header lists the codec's I2C
@@ -403,7 +487,7 @@ early, before WiFi and the rest fragment the heap). Stored in NVS (namespace `ba
 `CONFIG_BABYTALK_RESERVE_AT_BOOT`. Boards short of internal RAM build with it off and let the
 app opt in.
 
-### `babytalk_listener`
+### `babytalk_listener` / `BabyTalk.Listener`
 
 A `gen_server` that owns the mic and the speaker: listens for a wake phrase, records the
 message after it until the speaker stops talking, transcribes it, reports it, and speaks
@@ -646,6 +730,7 @@ build of BabyTalk made any other way needs them too.
 | App | What |
 |---|---|
 | `apps/listen_demo` | the full conversation: wake phrase, message, "You said: ..." |
+| `apps/voice_commands` | the same in Elixir, with a few commands ("count to three", "how much memory do you have") |
 | `apps/wakeword_demo` | teach it your own wake phrase by voice ("Did you say ...?"), then talk to it |
 | `apps/tts_demo` | speech out: pace, volume, PCM hashes |
 | `apps/stt_server` + `tools/stt_client.py` | send WAVs over WiFi, get transcripts back (the board's address from `--host`, `$STT_HOST` or `board.conf`) |

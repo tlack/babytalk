@@ -1,0 +1,13 @@
+# AtomVM + BabyTalk on a 16 MB ESP32-P4, with a "voice" partition for a larger sanoTTS voice
+# (SANOTTS_VOICE=heart or heart4: PARTITIONS=atomvm/partitions-babytalk-voice.csv atomvm/build.sh ...).
+# The same as partitions-babytalk.csv up to main.avm, which gives 3 MB to the voice (heart's
+# voice.bin is 2.4 MB). Everything stays below 16 MB: above it the flash needs 32-bit
+# addresses, which ESP-IDF 5.5 supports only experimentally.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x400000,
+boot.avm, data, phy,     0x410000, 0x80000,
+model,    data, 0x40,    0x490000, 0x600000,
+main.avm, data, phy,     0xA90000, 0x270000,
+voice,    data, 0x41,    0xD00000, 0x300000,

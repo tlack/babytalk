@@ -1,8 +1,8 @@
 # Text-to-speech voices
 
 BabyTalk speaks with [sanoTTS](https://github.com/Ampixa/sanoTTS) voices. There are three to
-choose from when building; the choice is made at build time (`prepare.sh <sanoTTS> <out> [voice]`,
-or `SANOTTS_VOICE=` for the Watchtower P4 firmware).
+choose from, at build time: `SANOTTS_VOICE=` for `atomvm/build.sh`, or the third argument of
+`components/sanotts/prepare.sh` in your own build.
 
 | voice | parameters | weights | quality (SCOREQ) | speed on the ESP32-P4 | where |
 |---|---|---|---|---|---|
@@ -20,18 +20,38 @@ trust a number: to our ears heart is plainly the better voice, and heart4 sounde
 recipe as nano (duration, acoustic model, vocoder), eight times the parameters. BabyTalk's G2P gives
 it the same phoneme ids as nano. It needs the ESP32-P4: the S3 would take about 2x real time.
 
-## Building and flashing heart (Watchtower P4 firmware)
+## Building and flashing heart
 
-    SANOTTS_VOICE=heart node_avm/firmware/p4/build.sh      # -> $OUT/voice.bin as well
-    python -m esptool --chip esp32p4 write_flash 0x8000 partition-table.bin \
-        0x10000 atomvm-esp32.bin 0xD00000 voice.bin
+With the AtomVM firmware, on an ESP32-P4:
 
-`prepare.sh` makes the voice from the checkout's float32 export (`web/voices/heart/`, checked
-against its `meta.json` hashes) with `tools/sanotts_voice.py`, which needs numpy (run through
-`uv`). `voice.bin` goes to the `voice` partition (3 MB at 0xD00000); the firmware reads it into
-PSRAM at the first speech (0.27 s, once), and refuses a partition that holds another voice or
-format than the one it was built for. The firmware and the voice go together: the runtime's
-shapes are compiled in from the voice's header.
+    SANOTTS_VOICE=heart PARTITIONS=atomvm/partitions-babytalk-voice.csv atomvm/build.sh esp32p4_pre_c6
+    esptool.py --chip esp32p4 write_flash 0x0 ~/build/atomvm-out-esp32p4_pre_c6/atomvm-babytalk.img \
+        0x490000 models/citrinet256_int4.mmrt 0xD00000 ~/build/atomvm-out-esp32p4_pre_c6/voice.bin
+
+How the pieces fit:
+
+1. **`components/sanotts/prepare.sh <sanoTTS checkout> <out> heart`** copies sanoTTS's C sources
+   into `<out>` and patches them. For heart it also builds the voice: it takes the float32 weights
+   the browser demo ships (`web/voices/heart/`, checked against their `meta.json` hashes), and
+   `tools/sanotts_voice.py` (numpy, run through `uv`) converts them to int8, writing
+   `<out>/voice/voice.bin` and a header with the voice's layer sizes.
+2. **The `sanotts` component** (`components/sanotts/CMakeLists.txt`) is built with
+   `-D SANOTTS_SRC=<out>`. When it finds `voice/voice.bin` there, it compiles the runtime for that
+   voice (its layer sizes from the header) and reads the weights from a flash partition labelled
+   `voice` at run time, rather than compiling them into the firmware as it does nano's.
+3. **`atomvm/build.sh`** does both steps for you, then copies `voice.bin` next to the firmware
+   image and prints where to flash it. It refuses heart on an ESP32-S3, and refuses a partition
+   table without a `voice` partition.
+
+The partition table belongs to whoever builds the firmware: `atomvm/partitions-babytalk.csv` has
+no voice partition, so `PARTITIONS=` picks another. `atomvm/partitions-babytalk-voice.csv` is
+the same table with `main.avm` (your app) cut to 2.4 MB to make room for a 3 MB `voice` partition
+at 0xD00000. In your own ESP-IDF app, add a data partition labelled `voice` (any subtype; we use
+0x41) of at least 2.4 MB.
+
+The firmware reads `voice.bin` into PSRAM at the first speech (0.27 s, once), and refuses a
+partition that holds another voice or format than the one it was built for. The firmware and
+the voice go together: flash both after every rebuild that changes the voice.
 
 Keep partitions below 16 MB. Above it the flash needs 32-bit addresses, which ESP-IDF 5.5 reads only
 with an experimental option: esptool wrote a voice at 28 MB fine, and the app's read came back

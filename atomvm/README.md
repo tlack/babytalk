@@ -547,7 +547,7 @@ The P4 names are AtomVM's own presets. The boot log (or `esptool.py chip_id`) sh
 chip's revision. `<tag>` is the pinned AtomVM release (`v0.7.0-beta.0`; another with
 `AVM_TAG`, if `patches/` still apply to it). ESP-IDF 5.5.1, which we build with, only builds for P4 silicon before v3.0:
 for a v3 chip, use a later 5.5 release. `AVM_DIR`, `OUT_DIR` and `IDF_PATH` override the
-locations.
+locations; `PARTITIONS` the partition table (default `partitions-babytalk.csv`).
 
 For every target, `build.sh` clones the pinned AtomVM tag (`AVM_DIR`), applies
 `patches/` (fixes to AtomVM itself: see [AtomVM patches](#atomvm-patches)), links in `components/` (ours and the shared `mmrt`, `sram_pool`, `stt_engine`,
@@ -569,6 +569,28 @@ at 0x0 (the P4's bootloader sits at 0x2000 inside it).
 | main.avm | 0xA90000 | 5.4 MB | your app: last, so it takes whatever flash is left |
 
 The int8 model needs a 10 MB model partition: `../docs/MODELS.md` section 1.
+
+**Text to speech and its voice.** Three things work together, and `build.sh` drives them:
+
+- `../components/sanotts/prepare.sh` copies sanoTTS's C sources from your checkout
+  (`SANOTTS_DIR`) into `$OUT/sanotts_src` and patches them. It refuses a checkout at any commit
+  but the one whose licences we checked. With no checkout, the firmware builds without speech.
+- The `sanotts` ESP-IDF component compiles those sources into the firmware.
+- `SANOTTS_VOICE` picks the voice. `nano` (the default) is small enough to be compiled into the
+  firmware. `heart` (ESP32-P4 only) sounds much better but is 2.4 MB: `prepare.sh` converts its
+  weights into a separate file, `$OUT/voice.bin`, which you flash to a `voice` partition. The
+  default partition table has none, so build with
+  `PARTITIONS=atomvm/partitions-babytalk-voice.csv` (or your own table):
+
+```bash
+SANOTTS_VOICE=heart PARTITIONS=atomvm/partitions-babytalk-voice.csv atomvm/build.sh esp32p4_pre_c6
+esptool.py --chip esp32p4 write_flash 0x0 ~/build/atomvm-out-esp32p4_pre_c6/atomvm-babytalk.img \
+    0x490000 models/citrinet256_int4.mmrt 0xD00000 ~/build/atomvm-out-esp32p4_pre_c6/voice.bin
+```
+
+The firmware and `voice.bin` go together (the firmware is compiled for that voice's layer
+sizes), so flash both after a rebuild. Voices compared, and how heart was made fast enough:
+[../docs/TTS_VOICES.md](../docs/TTS_VOICES.md).
 
 If boards share a serial port, flash with `../tools/flash.sh` instead of esptool: same
 offset/file arguments, but it reads the chip's MAC first and refuses to write unless it

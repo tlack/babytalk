@@ -16,15 +16,39 @@
 # OUT_DIR the results (default ~/build/atomvm-out, ~/build/atomvm-out-<TARGET>); IDF_PATH an
 # ESP-IDF 5.5 tree. The Erlang/Elixir boot libraries (boot.avm) come from AtomVM's release
 # image for the same target, so no host build of AtomVM (and no gperf) is needed.
+#
+# Text to speech (optional) is built from a sanoTTS checkout (SANOTTS_DIR, default
+# ~/build/tts/sanoTTS) by components/sanotts/prepare.sh. SANOTTS_VOICE picks the voice:
+#   nano    the default: 294k parameters, compiled into the firmware
+#   heart   ESP32-P4 only: 2.27M parameters, sounds much better; its weights are a separate
+#           file, $OUT/voice.bin, flashed to a "voice" partition (3 MB) -- see PARTITIONS
+#   heart4  the same voice with 4-bit weights: slower, and not yet smaller (docs/TTS_VOICES.md)
+# PARTITIONS: your own partition table instead of atomvm/partitions-babytalk.csv (which has
+# no voice partition), e.g. atomvm/partitions-babytalk-voice.csv for heart.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TAG="${AVM_TAG:-v0.7.0-beta.0}"    # AVM_TAG: another AtomVM release (patches/ must still apply)
 TARGET="${1:-${TARGET:-esp32s3}}"
+VOICE="${SANOTTS_VOICE:-nano}"
 case "$TARGET" in
     esp32s3) CHIP=esp32s3; SUFFIX="" ;;
     esp32p4|esp32p4_pre|esp32p4_c6|esp32p4_pre_c6) CHIP=esp32p4; SUFFIX="-$TARGET" ;;
     *) echo "unknown target '$TARGET': esp32s3, esp32p4_pre_c6, esp32p4_c6, esp32p4_pre or esp32p4" >&2; exit 2 ;;
 esac
+case "$VOICE" in
+    nano) ;;
+    heart|heart4) [ "$CHIP" = esp32p4 ] || { echo "SANOTTS_VOICE=$VOICE needs an ESP32-P4 (the S3 would speak at about 2x real time)" >&2; exit 2; } ;;
+    *) echo "unknown SANOTTS_VOICE '$VOICE': nano, heart or heart4" >&2; exit 2 ;;
+esac
+TABLE_SRC="${PARTITIONS:-$HERE/partitions-babytalk.csv}"
+[ -f "$TABLE_SRC" ] || { echo "no partition table at $TABLE_SRC" >&2; exit 2; }
+TABLE_SRC="$(realpath "$TABLE_SRC")"
+part_off() { awk -F, -v n="$1" '$1 ~ "^"n"[ ]*$" {gsub(/ /, "", $4); print $4}' "$TABLE_SRC"; }
+if [ "$VOICE" != nano ] && [ -z "$(part_off voice)" ]; then
+    echo "SANOTTS_VOICE=$VOICE: $TABLE_SRC has no 'voice' partition for voice.bin" >&2
+    echo "  (PARTITIONS=$HERE/partitions-babytalk-voice.csv has one)" >&2
+    exit 2
+fi
 AVM="${AVM_DIR:-$HOME/build/atomvm-$TAG$SUFFIX}"
 OUT="${OUT_DIR:-$HOME/build/atomvm-out$SUFFIX}"
 export IDF_PATH="${IDF_PATH:-$HOME/build/lvgl_micropython/lib/esp-idf}"
@@ -44,7 +68,7 @@ for c in "$HERE"/components/*/; do ln -sfn "$c" "$E/components/$(basename "$c")"
 for c in mmrt sram_pool stt_engine sanotts; do ln -sfn "$HERE/../components/$c" "$E/components/$c"; done
 # Our partition table (AtomVM's CMakeLists would otherwise impose its own: patches/0004)
 TABLE=partitions-babytalk.csv
-cp "$HERE/$TABLE" "$E/"
+cp "$TABLE_SRC" "$E/$TABLE"
 if [ "$CHIP" = esp32p4 ]; then
     # AtomVM's own recipe (its CI): the variant's preset, and for a C6 co-processor
     # esp_wifi_remote (bringing esp_hosted), so AtomVM's network driver reaches the C6's WiFi
@@ -68,15 +92,20 @@ if [ ! -f sdkconfig ] || [ "$(cat .babytalk-overlay 2>/dev/null)" != "$stamp" ];
     idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" -D AVM_PARTITION_TABLE_FILENAME="$TABLE" set-target "$CHIP"
     echo "$stamp" > .babytalk-overlay
 fi
-# Text to speech: sanoTTS sources (github.com/Ampixa/sanoTTS) copied and patched; its static
-# buffers go to PSRAM (internal RAM is short next to AtomVM + WiFi)
+# Text to speech: prepare.sh copies sanoTTS's sources (github.com/Ampixa/sanoTTS) to
+# $OUT/sanotts_src and patches them; for heart/heart4 it also converts that voice's weights
+# into $OUT/sanotts_src/voice/voice.bin, which the sanotts component's CMakeLists sees and
+# builds for (the voice's shapes compiled in, its weights read from the "voice" partition).
+# The static buffers go to PSRAM (internal RAM is short next to AtomVM + WiFi).
 mkdir -p "$OUT"
+rm -f "$OUT/voice.bin"
 TTS_ARGS=()
-rc=0; "$HERE/../components/sanotts/prepare.sh" "${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}" "$OUT/sanotts_src" || rc=$?
+rc=0; "$HERE/../components/sanotts/prepare.sh" "${SANOTTS_DIR:-$HOME/build/tts/sanoTTS}" "$OUT/sanotts_src" "$VOICE" || rc=$?
 case $rc in
     0) TTS_ARGS=(-D SANOTTS_SRC="$OUT/sanotts_src" -D SANOTTS_BSS_PSRAM=1) ;;
-    1) echo "no sanoTTS checkout: building without text to speech (babytalk:say/1 will return {error, -4})" >&2 ;;
-    *) exit $rc ;;                                   # wrong sanoTTS commit
+    1) [ "$VOICE" = nano ] || { echo "SANOTTS_VOICE=$VOICE: no sanoTTS checkout to build it from" >&2; exit 2; }
+       echo "no sanoTTS checkout: building without text to speech (babytalk:say/1 will return {error, -4})" >&2 ;;
+    *) exit $rc ;;                                   # wrong sanoTTS commit, or the voice failed
 esac
 idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" -D AVM_PARTITION_TABLE_FILENAME="$TABLE" "${TTS_ARGS[@]}" build
 
@@ -105,8 +134,12 @@ PY
 
 # One image from 0x0: ESP-IDF's own flash layout (the bootloader at 0x0 on the S3, 0x2000 on
 # the P4), plus boot.avm at our partition table's offset
-BOOT_OFF="$(awk -F, '$1 ~ /^boot\.avm/ {gsub(/ /, "", $4); print $4}' "$HERE/partitions-babytalk.csv")"
+BOOT_OFF="$(part_off boot.avm)"
 (cd build && python -m esptool --chip "$CHIP" merge_bin -o "$OUT/atomvm-babytalk.img" \
     @flash_args "$BOOT_OFF" "$OUT/boot.avm")
 ls -l "$OUT/atomvm-babytalk.img" build/atomvm-esp32.bin
-echo "flash: esptool.py --chip $CHIP write_flash 0x0 $OUT/atomvm-babytalk.img   (the model goes to 0x490000, apps to main.avm at 0xA90000)"
+echo "flash: esptool.py --chip $CHIP write_flash 0x0 $OUT/atomvm-babytalk.img   (the model goes to $(part_off model), apps to main.avm at $(part_off main.avm))"
+if [ -f "$OUT/sanotts_src/voice/voice.bin" ]; then
+    cp "$OUT/sanotts_src/voice/voice.bin" "$OUT/voice.bin"
+    echo "voice ($VOICE): esptool.py --chip $CHIP write_flash $(part_off voice) $OUT/voice.bin   (goes with this firmware: rebuild both together)"
+fi

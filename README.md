@@ -2,17 +2,14 @@
 
 ![BabyTalk: small AI models for speech to text and text to speech on ESP32 microcontrollers](docs/babytalk-splash.png)
 
-**BabyTalk** makes an ESP32-S3 that **understands what you say and talks back, with no
-cloud and no internet**, driven from MicroPython (or an ESP32-P4, from AtomVM):
+**BabyTalk** makes an ESP32-S3 or ESP32-P4 that **understands what you say and talks back,
+with no cloud and no internet**, from C, MicroPython, or Erlang and Elixir on AtomVM:
 
 ```python
 import stt, tts
 text = stt.transcribe(pcm)                 # 16 kHz audio -> "what's the weather like today"
 audio = tts.say("You said: " + text)       # text -> 24 kHz audio for the speaker
 ```
-
-It also runs from **Erlang and Elixir** on [AtomVM](https://github.com/atomvm/AtomVM): see
-[BabyTalk for AtomVM](#babytalk-for-atomvm-erlang--elixir).
 
 Made by Thomas Lackner and Claude Opus 5.5 (Anthropic). MIT licensed; the speech models
 belong to their authors (see [Credits and licenses](#credits-and-licenses)).
@@ -50,17 +47,75 @@ expert adapters for the speech model. They aren't used yet.)
 
 ## What you need
 
-- An **ESP32-S3 with 16 MB flash and 8 MB PSRAM** (e.g. an "N16R8" module). The speech
-  model alone is 6 MB, and the runtime needs PSRAM for its working memory.
-- A microphone (and a speaker for text to speech). Everything was built and tested on the
-  **Waveshare ESP32-S3-CAM** (ES7210 mic, ES8311 speaker codec), and the examples use its
-  pins and drivers. On another board, give `stt` 16 kHz PCM from whatever mic you have.
-- Or, from AtomVM only: an **ESP32-P4**. The **Waveshare ESP32-P4-WIFI6** (ES8311 mic and
-  speaker codec) is supported, and faster than the S3: 2 s of speech transcribed in 0.30 s,
-  speech synthesized at 0.23x real time
-  ([docs/BOARD_WAVESHARE_P4_WIFI6.md](docs/BOARD_WAVESHARE_P4_WIFI6.md)).
-- To build: Linux or WSL, [ESP-IDF v5.5.1](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/),
-  and [uv](https://docs.astral.sh/uv/) for the Python tools.
+- **An ESP32-S3 or ESP32-P4** with 16 MB flash and 8 MB PSRAM (e.g. an S3 "N16R8" module).
+  The P4 transcribes about 1.7 times faster (2 s of speech in 0.30 s, against 0.51 s) and
+  can run a larger, better-sounding voice. BabyTalk runs on:
+  - **Waveshare ESP32-S3-CAM** (ES7210 mic, ES8311 speaker codec): the reference board;
+    everything is measured on it, from MicroPython and AtomVM
+    ([docs/BOARD_WAVESHARE_S3_CAM.md](docs/BOARD_WAVESHARE_S3_CAM.md))
+  - **Waveshare ESP32-P4-WIFI6** (ES8311 mic and speaker codec), from AtomVM
+    ([docs/BOARD_WAVESHARE_P4_WIFI6.md](docs/BOARD_WAVESHARE_P4_WIFI6.md))
+  - **LilyGO T-LoRa Pager** (ES8311), from AtomVM, with its own audio driver
+  - **Elecrow CrowPanel Advance 7.0"** (PDM mic), from AtomVM, speech to text only
+- **A microphone, for speech to text.** Anything that gives 16 kHz PCM. Memory: the 6 MB
+  model in flash (read in place, not copied to RAM), an 84.5 KB block of internal RAM
+  (or PSRAM), and ~0.2 MB of PSRAM while transcribing 4 s.
+- **A speaker, for text to speech** (optional). Memory: 1.9 MB more firmware in flash
+  (voice and pronunciation dictionary), ~104 KB of buffers (internal RAM under MicroPython,
+  PSRAM under AtomVM), and ~0.4 MB of PSRAM for a 4 s reply. It shares the 84.5 KB block
+  with speech to text, so the two take turns.
+- **To build:** Linux or WSL, [ESP-IDF v5.5.1](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/),
+  and [uv](https://docs.astral.sh/uv/) for the Python tools. (AtomVM also needs
+  Erlang/OTP 26+ and Elixir 1.17+.)
+
+The full memory breakdown is in [Performance and memory](#performance-and-memory).
+
+## Language support
+
+All three share one engine (`components/`), and give the same transcripts.
+
+**C (ESP-IDF).** Add `components/stt_engine` (with `mmrt` and `sram_pool`) and, for speech,
+`components/sanotts` to your ESP-IDF project. The engine maps the model from a `model`
+flash partition; you hand it 16 kHz PCM.
+
+```c
+stt_engine_open();
+stt_result_t r;
+stt_engine_run(pcm, n_samples, &r);         // r.text: "what's the weather like today"
+int16_t *out; int n_out;
+tts_say(r.text, 0.8f, &out, &n_out, NULL);   // 24 kHz PCM (in PSRAM) for your I2S driver
+```
+
+API: [`stt_engine.h`](components/stt_engine/stt_engine.h),
+[`tts_engine.h`](components/sanotts/tts_engine.h). The inference runtime on its own:
+[`mmrt/README.md`](mmrt/README.md). `stt/` is a standalone ESP-IDF test app for the engine.
+
+**MicroPython** (ESP32-S3). A MicroPython v1.27.0 firmware with `stt` and `tts` modules.
+You bring the audio with `machine.I2S`; codec drivers for the ES7210 and ES8311 are in
+`mpy/drivers/`. Transcription can run in the background while asyncio keeps going, and a
+wake phrase is a list of spellings. See [`mpy/README.md`](mpy/README.md).
+
+```python
+import stt
+stt.phrase(["wake up tomato face"])        # score every run for this phrase
+text = stt.transcribe(pcm)
+stt.last()["score"]                        # 0 = the phrase is the best reading
+```
+
+**AtomVM** (Erlang and Elixir, ESP32-S3 and ESP32-P4). AtomVM v0.7 has no I2S driver yet,
+so BabyTalk brings its own audio drivers (ES7210, ES8311, a GPIO- or expander-switched amp).
+Pins and parts are chosen at run time, so there is one firmware per chip and your app picks
+a board preset or its own pins ([boards and pins](atomvm/README.md#boards-and-pins)). It
+adds a supervised `gen_server` that listens for a wake phrase with audible chimes, and
+**MMRT** as a standalone library of int8/int4 vector kernels (matvec, matmul, top-k...) for
+any AtomVM project. See [`atomvm/README.md`](atomvm/README.md).
+
+```erlang
+ok = babytalk:audio_config(waveshare_s3_cam),       % or your own pins: a map
+{ok, Pcm} = babytalk:record(3),
+{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000),
+ok = babytalk:speak([<<"You said: ">>, Text]).
+```
 
 ## How it works
 
@@ -327,26 +382,6 @@ cd ../export && uv run field_eval.py --split all                # score the mode
 cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune (GPU if present; --device cpu|mps|cuda)
 ```
 
-## BabyTalk for AtomVM (Erlang / Elixir)
-
-The same engine, from Erlang and Elixir on AtomVM v0.7 ([atomvm/README.md](atomvm/README.md)),
-on the ESP32-S3 and the ESP32-P4:
-speech to text, text to speech, a wake phrase with audible chimes, microphone and speaker,
-run by a supervised `gen_server`, plus **MMRT** as a standalone library of int8/int4 vector kernels
-(matvec, matmul, dot, top-k... on the S3's or the P4's SIMD unit) for any AtomVM project. Transcripts are
-identical to the MicroPython firmware's. AtomVM has no I2S driver yet, so BabyTalk brings its
-own C drivers for the audio chips (ES7210 mic ADC, ES8311 codec, a speaker amp and power
-switched by a GPIO or an IO expander). **Pins and parts are chosen at run time**: one
-firmware per chip, and your app picks a board preset or its own pins
-(`babytalk:audio_config/1`, [atomvm/README.md#boards-and-pins](atomvm/README.md#boards-and-pins)).
-
-```erlang
-ok = babytalk:audio_config(waveshare_s3_cam),       % or your own pins: a map
-{ok, Pcm} = babytalk:record(3),
-{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000),
-ok = babytalk:speak([<<"You said: ">>, Text]).
-```
-
 ## Limitations
 
 - English only, 16 kHz audio. Transcription starts after you stop talking (no live
@@ -355,9 +390,9 @@ ok = babytalk:speak([<<"You said: ">>, Text]).
   noise; the fine-tuned model (above) isn't quantized for the board yet.
 - The int4 model trades ~2 points of accuracy for size (see the table above).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
-- Tested on two boards: the Waveshare ESP32-S3-CAM, and (from AtomVM) the Waveshare
-  ESP32-P4-WIFI6. From AtomVM, another board with the same audio chips (ES7210/ES8311) needs
-  only its pins, set at run time (`babytalk:audio_config/1`); other chips need a C driver
+- MicroPython is tested on one board (the Waveshare ESP32-S3-CAM), AtomVM on the four in
+  [What you need](#what-you-need). From AtomVM, another board with the same audio chips
+  (ES7210/ES8311) needs only its pins, set at run time (`babytalk:audio_config/1`); other chips need a C driver
   (`board_audio.h`). MicroPython's drivers (`mpy/drivers/`) work on the I2C bus and I2S port
   your script opens, so their pins are already yours to choose.
 - Listening and speaking take turns (they share one block of internal RAM).

@@ -86,9 +86,8 @@ int16_t *out; int n_out;
 tts_say(r.text, 0.8f, &out, &n_out, NULL);   // 24 kHz PCM (in PSRAM) for your I2S driver
 ```
 
-API: [`stt_engine.h`](components/stt_engine/stt_engine.h),
-[`tts_engine.h`](components/sanotts/tts_engine.h). The inference runtime on its own:
-[`mmrt/README.md`](mmrt/README.md). `stt/` is a standalone ESP-IDF test app for the engine.
+Setup, build options and the full API: [`components/README.md`](components/README.md). The
+inference runtime on its own: [`mmrt/README.md`](mmrt/README.md).
 
 **MicroPython** (ESP32-S3). A MicroPython v1.27.0 firmware with `stt` and `tts` modules.
 You bring the audio with `machine.I2S`; codec drivers for the ES7210 and ES8311 are in
@@ -220,7 +219,7 @@ Tested from the board's internal filesystem (not an SD card): installing and ver
 | folder | what |
 |---|---|
 | `mmrt/` | the int8/int4 inference runtime (C + ESP32-S3 and ESP32-P4 SIMD assembly) |
-| `components/` | ESP-IDF components shared by the firmwares: `mmrt`, `stt_engine`, `sram_pool`, `sanotts` |
+| `components/` | the engines as ESP-IDF components, for C apps and both firmwares: `mmrt`, `stt_engine`, `sram_pool`, `sanotts` ([README](components/README.md)) |
 | `mpy/` | the MicroPython firmware: `stt` and `tts` modules, codec drivers, examples |
 | `atomvm/` | the AtomVM (Erlang/Elixir) firmware: NIFs, libraries, demo apps |
 | `stt/` | a plain ESP-IDF test firmware, where the engine is developed and measured |

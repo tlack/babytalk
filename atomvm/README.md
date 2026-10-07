@@ -46,12 +46,19 @@ Two libraries, usable separately:
 | `build.sh`, `sdkconfig.babytalk`, `partitions-babytalk.csv`, `patches/` | the firmware build |
 
 **Status.** All of it works on the **Waveshare ESP32-S3-CAM**: say "wake up tomato face", wait
-for the chime, say something, and the board says it back (`apps/listen_demo`). On the
-**Waveshare ESP32-P4-WIFI6**, the speaker, mic, speech synthesis and speech recognition run
-([../docs/BOARD_WAVESHARE_P4_WIFI6.md](../docs/BOARD_WAVESHARE_P4_WIFI6.md)); a transcript of
-live speech on that board is still to be checked. Run-time audio configuration
-(`audio_config/1`) is new: it builds for both chips and its Erlang side is tested on the PC,
-but it hasn't run on a board yet.
+for the chime, say something, and the board says it back (`apps/listen_demo`). It also runs
+in Watchtower, our network of sensor and messaging nodes, on four boards, next to
+WiFi, a camera or a screen:
+
+| Board | Audio | How | Speech |
+|---|---|---|---|
+| Waveshare ESP32-S3-CAM | ES7210 mic, ES8311 speaker | built-in driver, default board | to text and back; wake phrase, hands free |
+| Waveshare ESP32-P4-WIFI6 ([notes](../docs/BOARD_WAVESHARE_P4_WIFI6.md)) | ES8311 mic and speaker | built-in driver, default board | to text and back; the larger `heart` voice ([TTS_VOICES.md](../docs/TTS_VOICES.md)) |
+| LilyGO T-LoRa Pager | ES8311 mic and speaker, NS4150B amp on an XL9555 expander | its own driver ([Other audio chips](#other-audio-chips)) | to text and back; push to talk and wake phrase |
+| Elecrow CrowPanel Advance 7.0" | PDM mic | its own driver | to text only (no speaker fitted): a mic key on the on-screen keyboard |
+
+Those firmwares pick their board in Kconfig. Changing the board from Erlang
+(`audio_config/1`) is tested on the PC but not yet on a board.
 
 ## Quick start
 
@@ -205,6 +212,17 @@ capture start/read/stop, play, an underrun count) and build with
 `CONFIG_BABYTALK_BOARD_CUSTOM=y`. Everything above that header (engines, NIFs, Erlang) is
 board-independent; `board_audio.c` is a worked example. In a custom build, `audio_config/0,1`
 return `{error, custom_board}` and `audio_presets/0` returns `[]`.
+
+Two custom drivers run in Watchtower: the T-LoRa Pager's (ES8311 and an amp on an XL9555,
+written before run-time configuration: the built-in driver could probably now do it with a
+map) and the CrowPanel's PDM mic. What they taught us:
+
+- `board_audio_rx_read` fills every frame and returns **0**, not the number of frames: any
+  other value is taken as an error.
+- The ESP32-S3's PDM receiver has no high-pass filter, and its output sits on a large DC
+  offset. Run a one-pole DC blocker (~40 Hz) over it, seeded with the first sample so it
+  doesn't start with a step.
+- If the board's I2C bus is already open (a touch panel, a camera), use that bus's handle.
 
 ## OTP structure
 
@@ -400,7 +418,7 @@ replies, with chimes between the phases.
 | `audio` | `none` | the board, as `babytalk:audio_config/1` takes it (a preset name or a map); `none` leaves the board in use alone |
 | `spellings` | `[]` | the wake phrase's spellings; `[]` = no wake phrase: the listener chimes and waits for `ask/3` or `wake_on/2` |
 | `threshold` | `-21.0` | wake when the phrase's score is at least this (from `export/kws.py`) |
-| `window_ms` / `every_ms` | `4000` / `1000` | the audio scored for the phrase, and how often |
+| `window_ms` / `every_ms` | `4000` / `1000` | the audio scored for the phrase, and how often. A short phrase does better with a short window scored often: Watchtower uses `1500` / `500` (quicker to transcribe, and the phrase lands whole in one window) |
 | `vad` | `true` | score only after something louder than the room was heard (a transcription takes both cores for 0.3-1.5 s) |
 | `vad_factor` / `vad_min` | `2` / `200` | "louder": this many times the noise floor, and at least this RMS |
 | `silence_ms` | `700` | quiet after speech that ends a message |
@@ -435,6 +453,9 @@ Calls (all casts, returning `ok`):
 - **`ask(Server, Prompt, Opts)`**: say `Prompt`, chime, record the answer until silence (or
   exactly `#{ms => Ms}`), report `{answer, Text}`, then wait (mic off) for the next call.
 - **`wake_on(Server, Spellings)`**: set a new wake phrase and start the wake loop.
+- **`hold(Server, Ms)`**: no wake-phrase scoring for the next `Ms`, e.g. while someone is
+  using the device's screen or keyboard, so the scoring doesn't slow it down. Each call
+  sets the hold to `Ms` from now.
 
 `sentences(Text)` is also exported: the pieces `say/2` would speak.
 
@@ -564,6 +585,27 @@ Firmware options (`idf.py menuconfig`, or lines in `sdkconfig.babytalk*`):
 | `CONFIG_BABYTALK_RESERVE_AT_BOOT` | y | take the engines' 84.5 KB of internal RAM at boot (see `reserve_at_boot/1`) |
 | `CONFIG_BABYTALK_STACKS_IN_PSRAM` | n | the worker and audio task stacks (16 KB) in PSRAM, for boards short of internal RAM |
 | `CONFIG_SRAM_POOL_IN_PSRAM` | n (y on the P4) | the engines' pool in PSRAM (right on the P4, where only synthesis uses it) |
+| `CONFIG_BABYTALK_YIELD` | n | speech work runs at the AtomVM schedulers' priority instead of above them, so the VM keeps running during a transcription (for a board with a screen) |
+
+**Fitting next to WiFi, a camera or a screen.** Internal RAM is what runs out. What the
+Watchtower boards use, roughly in order of payoff:
+
+- `CONFIG_SRAM_POOL_IN_PSRAM=y` and `CONFIG_BABYTALK_STACKS_IN_PSRAM=y`: about 100 KB of
+  internal RAM back, a little slower. On the S3-CAM with WiFi up: 97 KB free instead of 22.
+- Fewer static WiFi buffers: the radio's DMA can't reach PSRAM, so WiFi stages frames in
+  internal RAM. `CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8` and `..._STATIC_RX_BUFFER_NUM=8`
+  (from 16 and 10) gave the Pager 17 KB back, enough for the mic's DMA buffers.
+- Software AES for TLS (`CONFIG_MBEDTLS_HARDWARE_AES` off): hardware AES wants an internal
+  DMA buffer for every TLS record, and fails when RAM is tight.
+- `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256` (from 4096), so Erlang heaps and display widgets go
+  to PSRAM; display frame buffers in PSRAM.
+- `CONFIG_BABYTALK_RESERVE_AT_BOOT=n`, and let the app opt in with `reserve_at_boot/1` (the
+  Pager has a setting for it).
+- On a board with a screen, `CONFIG_BABYTALK_YIELD=y` and `babytalk_listener:hold/2` while
+  the screen is in use: the CrowPanel's on-screen keyboard went from 0.5-1.7 s per key while
+  the room was talking to ~90 ms.
+
+`heap_info/0` shows where you stand: watch `internal_largest`, not just `internal_free`.
 
 ### AtomVM patches
 
@@ -633,7 +675,8 @@ internal RAM free at boot, ~227 KB online. Details:
 
 AtomVM v0.7 is still a pre-release (beta.0; the project recommends v0.6 for production). While a transcription
 runs, MMRT keeps both cores busy (its helper task on core 0), so Erlang code and WiFi respond
-more slowly for those ~0.2 s per second of audio. The mic and the speaker take turns (one
+more slowly for those ~0.2 s per second of audio (`CONFIG_BABYTALK_YIELD` trades speech speed
+for a responsive VM). The mic and the speaker take turns (one
 I2S port), so the board can't hear you while it talks. The end of a message is found by
 loudness, so a noisy room may run to the 6 s cap. The built-in audio driver knows two codecs
 (ES7210, ES8311); other chips need a C driver (`CONFIG_BABYTALK_BOARD_CUSTOM`).

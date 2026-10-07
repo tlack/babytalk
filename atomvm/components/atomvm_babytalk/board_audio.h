@@ -24,7 +24,7 @@ int board_audio_init(int mic_gain);
 
 // Capture at 16 kHz; discards the first 200 ms (ADC/filter settling).
 int board_audio_rx_start(void);
-int board_audio_rx_read(int16_t *mono, int frames);  // blocking; mic 1
+int board_audio_rx_read(int16_t *mono, int frames);  // fills all frames, blocking: 0, or negative on failure
 void board_audio_rx_stop(void);                      // frees the port
 
 // Play mono PCM at `rate` Hz through the speaker, blocking. volume 0..100 (DAC; 75 = 0 dB).

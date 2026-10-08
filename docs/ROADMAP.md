@@ -125,6 +125,43 @@ ES7210/ES8311 audio need only a pin map, set at run time (`babytalk:audio_config
 
 The tools themselves (`field/`, `export/hard_words.py`, `train/`) can be published anytime.
 
+## 10. Experiment: sub-1-bit weights (LittleBit)
+
+**Why:** [LittleBit](https://github.com/SamsungLabs/LittleBit) (Samsung, NeurIPS 2025 /
+ICML 2026) stores each weight matrix as two thin sign-only (±1) matrices plus row, column and
+latent scales: `W ≈ diag(h) U± diag(l) V±ᵀ diag(g)`, trained with distillation from the
+full-precision model. On LLMs it holds up well down to 0.3-0.55 bits per weight. For us the
+interesting use isn't shrinking Citrinet-256 but fitting a **bigger model** in the 6 MB
+partition: a Citrinet-512 (~36M parameters, ~18 MB at 4 bits, see 8) is ~4.5 MB at 1 bit.
+
+**What we know:** Citrinet-256's 1x1 weights (129 layers, 126 of them 256x256) are not very
+low-rank: 90% of their energy takes 43% of full rank, 99% takes 72%. The best rank-128 fit
+(the 1-bit budget), before reducing it to signs, already has 25% relative weight error; at
+0.5 bits, 53%. LLM matrices are far more redundant, and the paper's smallest model (OPT-1.3B)
+already degrades much more than the large ones. So expect little for Citrinet-256 itself.
+
+**How:**
+1. Run the same SVD check on a Citrinet-512 checkpoint: wider layers should be more low-rank.
+2. On the host, using item 2's QAT setup, train Citrinet-256 at 1 and 0.5 bits and compare
+   with the 4-bit GPTQ model (8.2% WER, test-clean). Cheap: a 10M-parameter model trains in
+   hours.
+3. If that's close, try Citrinet-512 at 0.5-1 bits.
+
+**On the board:** activations are int8, so there's no XNOR/popcount; the signs are expanded to
+±1 int8 and fed to the existing 1x1 group kernel, like int4 decoding today. At 1 bit or less
+the multiply-adds are the same or fewer, and far fewer weight bytes cross the flash/PSRAM bus
+(the critical path today).
+
+**Risks:** the latent scale needs a requantization between the two multiplies, and int8
+activations are already where most of our quantization loss comes from (`export/RESULTS.md`),
+so that intermediate probably has to stay int16. On 256x256 matrices, 16-bit scales add ~0.13
+bits per weight, so they should be 8-bit. A Citrinet-512 at 1 bit does ~4x today's
+multiply-adds (~2x at 0.5 bits): likely too slow on the S3, maybe fine on the P4. The
+LittleBit code is CC BY-NC (non-commercial), so we implement from the paper rather than
+vendoring it.
+
+**Depends on / pairs with:** 2 (the QAT setup), 8 (other languages need the larger models).
+
 ## Smaller items
 
 - **Remember the enrolled wake phrase** across reboots (`wakeword_demo`): store it in NVS.

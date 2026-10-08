@@ -4,6 +4,7 @@
 #   atomvm/build.sh [TARGET]      (or TARGET=... atomvm/build.sh)
 #
 #   esp32s3          the default: any ESP32-S3 with 16 MB flash and 8 MB octal PSRAM (Waveshare ESP32-S3-CAM)
+#   esp32s3_quad     an ESP32-S3 with 16 MB flash and 8 MB quad PSRAM (LilyGO T-LoRa Pager)
 #   esp32p4_pre_c6   ESP32-P4 silicon before v3.0 + an ESP32-C6 for WiFi (Waveshare ESP32-P4-WIFI6 so far)
 #   esp32p4_c6       ESP32-P4 v3.0 or later + an ESP32-C6 for WiFi
 #   esp32p4_pre      ESP32-P4 before v3.0, no WiFi
@@ -32,8 +33,9 @@ TARGET="${1:-${TARGET:-esp32s3}}"
 VOICE="${SANOTTS_VOICE:-nano}"
 case "$TARGET" in
     esp32s3) CHIP=esp32s3; SUFFIX="" ;;
+    esp32s3_quad) CHIP=esp32s3; SUFFIX="-$TARGET" ;;
     esp32p4|esp32p4_pre|esp32p4_c6|esp32p4_pre_c6) CHIP=esp32p4; SUFFIX="-$TARGET" ;;
-    *) echo "unknown target '$TARGET': esp32s3, esp32p4_pre_c6, esp32p4_c6, esp32p4_pre or esp32p4" >&2; exit 2 ;;
+    *) echo "unknown target '$TARGET': esp32s3, esp32s3_quad, esp32p4_pre_c6, esp32p4_c6, esp32p4_pre or esp32p4" >&2; exit 2 ;;
 esac
 case "$VOICE" in
     nano) ;;
@@ -85,6 +87,7 @@ fi
 DEFAULTS="sdkconfig.defaults"
 [ "$CHIP" = esp32p4 ] && DEFAULTS="$DEFAULTS;sdkconfig.defaults.babytalk-variant"
 DEFAULTS="$DEFAULTS;$HERE/sdkconfig.babytalk"
+[ "$TARGET" = esp32s3_quad ] && DEFAULTS="$DEFAULTS;$HERE/sdkconfig.babytalk-psram-quad"
 cd "$E"
 stamp="$(echo "$TARGET" | cat - "$HERE"/sdkconfig.babytalk* | sha1sum | cut -c1-12)"
 if [ ! -f sdkconfig ] || [ "$(cat .babytalk-overlay 2>/dev/null)" != "$stamp" ]; then
@@ -111,9 +114,10 @@ idf.py -D SDKCONFIG_DEFAULTS="$DEFAULTS" -D AVM_PARTITION_TABLE_FILENAME="$TABLE
 
 # boot.avm: the Erlang + Elixir standard libraries, cut from AtomVM's release image for this
 # target (where that image's own partition table puts boot.avm)
-REL="$OUT/AtomVM-$TARGET-elixir-$TAG.img"
+REL_TARGET="${TARGET%_quad}"                       # (no quad-PSRAM release: the libraries are the same)
+REL="$OUT/AtomVM-$REL_TARGET-elixir-$TAG.img"
 [ -s "$REL" ] || curl -fsL -o "$REL" \
-    "https://github.com/atomvm/AtomVM/releases/download/$TAG/AtomVM-$TARGET-elixir-$TAG.img"
+    "https://github.com/atomvm/AtomVM/releases/download/$TAG/AtomVM-$REL_TARGET-elixir-$TAG.img"
 python3 - "$REL" "$OUT/boot.avm" <<'PY'
 import struct, sys
 img = open(sys.argv[1], "rb").read()

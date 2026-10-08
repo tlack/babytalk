@@ -57,6 +57,10 @@ config BABYTALK_BOARD_WAVESHARE_P4_WIFI6
     bool "Waveshare ESP32-P4-WIFI6 (ES8311 mic + speaker, NS4150B amp on GPIO 53)"
     depends on IDF_TARGET_ESP32P4
 
+config BABYTALK_BOARD_LILYGO_T_LORA_PAGER
+    bool "LilyGO T-LoRa Pager (ES8311 mic + speaker, NS4150B amp on an XL9555)"
+    depends on IDF_TARGET_ESP32S3
+
 config BABYTALK_BOARD_CUSTOM
     bool "Custom: another component implements board_audio.h"
     help

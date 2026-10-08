@@ -212,6 +212,7 @@ the datasheet but hasn't been used on a board yet.
 |---|---|---|---|---|---|---|
 | `waveshare_s3_cam` | Waveshare ESP32-S3-CAM ([notes](../docs/BOARD_WAVESHARE_S3_CAM.md)) | ES7210 at `0x40` | ES8311 at `0x18` | CH32V003 at `0x24`: amp pin 4, rail pin 6 | 8, 7 | 10, 11, 12, 14, 13 |
 | `waveshare_p4_wifi6` | Waveshare ESP32-P4-WIFI6 ([notes](../docs/BOARD_WAVESHARE_P4_WIFI6.md)) | ES8311 at `0x18` (its ADC) | the same ES8311 | GPIO 53 / none | 7, 8 | 13, 12, 10, 9, 11 |
+| `lilygo_t_lora_pager` | LilyGO T-LoRa Pager (quad PSRAM: build `esp32s3_quad`) | ES8311 at `0x18` (its ADC) | the same ES8311 | XL9555 at `0x20`: amp pin 1 / none | 3, 2 | 10, 11, 18, 45, 17 |
 
 The firmware starts out assuming its default board (Kconfig `BABYTALK_BOARD`: the S3-CAM on
 an S3, the P4-WIFI6 on a P4), but **touches no pin** until the first `listen`, `play` or
@@ -623,6 +624,7 @@ atomvm/build.sh [TARGET]          # or TARGET=... atomvm/build.sh
 | `TARGET` | Chip | AtomVM tree / output (defaults) |
 |---|---|---|
 | `esp32s3` (default) | ESP32-S3, 16 MB flash, 8 MB octal PSRAM | `~/build/atomvm-<tag>`, `~/build/atomvm-out` |
+| `esp32s3_quad` | ESP32-S3, 16 MB flash, 8 MB quad PSRAM (the LilyGO T-LoRa Pager); transcription is slower, as quad PSRAM has about half the bandwidth | `~/build/atomvm-<tag>-esp32s3_quad`, `~/build/atomvm-out-esp32s3_quad` |
 | `esp32p4_pre_c6` | ESP32-P4 before silicon v3.0, ESP32-C6 for WiFi (the Waveshare ESP32-P4-WIFI6 we tested: v1.3) | `~/build/atomvm-<tag>-<TARGET>`, `~/build/atomvm-out-<TARGET>` |
 | `esp32p4_c6` | ESP32-P4 v3.0 or later, ESP32-C6 for WiFi | same pattern |
 | `esp32p4_pre`, `esp32p4` | ESP32-P4 without WiFi (before / from v3.0) | same pattern |
@@ -730,6 +732,7 @@ build of BabyTalk made any other way needs them too.
 | App | What |
 |---|---|
 | `apps/listen_demo` | the full conversation: wake phrase, message, "You said: ..." |
+| `apps/mic_stream` | streams the mic over the USB console nonstop, for recording sessions (`field/capture.py --link usb`); `BABYTALK_BOARD` and `BABYTALK_MIC_GAIN` at build time pick the board and gain |
 | `apps/voice_commands` | the same in Elixir, with a few commands ("count to three", "how much memory do you have") |
 | `apps/wakeword_demo` | teach it your own wake phrase by voice ("Did you say ...?"), then talk to it |
 | `apps/tts_demo` | speech out: pace, volume, PCM hashes |

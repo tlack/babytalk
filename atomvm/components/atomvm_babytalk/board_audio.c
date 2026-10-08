@@ -5,8 +5,10 @@
 //   a speaker amp enable (NS4150B and the like) on a GPIO or an IO expander (CH32V003,
 //   PCA9555/TCA9555/XL9555), and optionally an audio power rail switched the same way
 // Presets: the Waveshare ESP32-S3-CAM (ES7210 mics, ES8311 speaker, a CH32V003 switches the
-// rail and the amp; docs/BOARD_WAVESHARE_S3_CAM.md) and the Waveshare ESP32-P4-WIFI6 (one
-// ES8311 for mic and speaker, amp on GPIO 53; docs/BOARD_WAVESHARE_P4_WIFI6.md).
+// rail and the amp; docs/BOARD_WAVESHARE_S3_CAM.md), the Waveshare ESP32-P4-WIFI6 (one
+// ES8311 for mic and speaker, amp on GPIO 53; docs/BOARD_WAVESHARE_P4_WIFI6.md) and the
+// LilyGO T-LoRa Pager (one ES8311 for mic and speaker, NS4150B amp on pin 1 of the XL9555
+// that also switches the board's other rails; pins from LilyGO's pins_arduino.h).
 //
 // The ESP is always the I2S master at MCLK = 256 x Fs, so the codecs' dividers are one fixed
 // row of Espressif's tables for every rate; the mic and the speaker take turns on one I2S port.
@@ -50,16 +52,25 @@
     .mic = BA_CODEC_ES8311, .mic_addr = 0x18, .mic_gain = -1, .mic_slot = 0,        \
     .spk = BA_CODEC_ES8311, .spk_addr = 0x18,                                       \
     .amp = {BA_CTL_GPIO, 0, 53, 0}, .power = {BA_CTL_NONE, 0, -1, 0}}
+#define LILYGO_T_LORA_PAGER {                                                       \
+    .i2c_port = 0, .sda = 3, .scl = 2, .i2c_hz = 100000,                            \
+    .i2s_port = 0, .mclk = 10, .bclk = 11, .ws = 18, .dout = 45, .din = 17,         \
+    .mic = BA_CODEC_ES8311, .mic_addr = 0x18, .mic_gain = -1, .mic_slot = 0,        \
+    .spk = BA_CODEC_ES8311, .spk_addr = 0x18,                                       \
+    .amp = {BA_CTL_PCA9555, 0x20, 1, 0}, .power = {BA_CTL_NONE, 0, -1, 0}}
 
 const board_audio_preset_t board_audio_presets[] = {
     {"\x10" "waveshare_s3_cam", WAVESHARE_S3_CAM},
     {"\x12" "waveshare_p4_wifi6", WAVESHARE_P4_WIFI6},
+    {"\x13" "lilygo_t_lora_pager", LILYGO_T_LORA_PAGER},
 };
 const int board_audio_n_presets = sizeof(board_audio_presets) / sizeof(board_audio_presets[0]);
 
 // until the app configures another: the firmware's default board (Kconfig)
 #if defined(CONFIG_BABYTALK_BOARD_WAVESHARE_P4_WIFI6)
 static board_audio_config_t s_cfg = WAVESHARE_P4_WIFI6;
+#elif defined(CONFIG_BABYTALK_BOARD_LILYGO_T_LORA_PAGER)
+static board_audio_config_t s_cfg = LILYGO_T_LORA_PAGER;
 #else
 static board_audio_config_t s_cfg = WAVESHARE_S3_CAM;
 #endif

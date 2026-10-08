@@ -32,7 +32,8 @@ loss, but it is not a switch: the simulation has to match MMRT exactly (the bit-
 executor, `mmrt/` built for the PC, is the reference), and the codebooks need a
 straight-through or re-clustering step during training.
 
-**Depends on / pairs with:** 1 (do it on the fine-tuned model, not the original).
+**Depends on / pairs with:** 1 (do it on the fine-tuned model, not the original); 10 (the
+sub-1-bit experiment) builds on the same setup.
 
 ## 3. Live, partial transcripts ("streaming")
 

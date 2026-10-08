@@ -374,9 +374,16 @@ of a real person reading), word error rate:
 So far this is the full-precision model on the PC. The int8 and int4 versions for the board
 still need to be rebuilt from it.
 
+**Hands free**: with a board that streams its mic over USB (`atomvm/apps/mic_stream`, e.g. on
+the LilyGO T-LoRa Pager), `capture.py --link usb --auto` records nothing but laptop voices,
+with no prompts, so a session can run during a drive. The laptop cuts each clip out of the
+stream where its playback starts (found by cross-correlation) and keeps the whole stream too.
+
 ```bash
 cd field && uv run prompts.py                                   # build the sentence pool
 uv run capture.py --condition truck-idle --noise "diesel idling"   # a recording session
+uv run capture.py --link usb --board lilygo-t-lora-pager --mic es8311 --auto --minutes 45 \
+    --condition truck-drive --noise "diesel, open doors, traffic"     # hands free
 cd ../export && uv run field_eval.py --split all                # score the models
 cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune (GPU if present; --device cpu|mps|cuda)
 ```

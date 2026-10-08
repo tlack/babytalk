@@ -10,8 +10,20 @@ then move things around and start the next session.
     uv run capture.py --condition humvee-driving --noise "diesel, 45 mph, windows up" --gain 4
     uv run capture.py --noise-bed 120 --condition humvee-driving --noise "diesel, 45 mph"
 
-The board joins WiFi (stt/main/wifi_secrets.h) and sends audio over TCP; the USB console
-only carries commands.
+Hands free (TTS only, nothing to press: for recording while driving), from a board that
+streams its mic over USB (atomvm/apps/mic_stream, e.g. the LilyGO T-LoRa Pager):
+    uv run capture.py --link usb --board lilygo-t-lora-pager --mic es8311 --auto --minutes 45 \
+        --condition truck-drive --noise "diesel, open doors, traffic, some music"
+
+Two links to the board:
+  mpy  (default) MicroPython (field/capture_board.py): commands over the USB console, audio
+       over WiFi TCP (stt/main/wifi_secrets.h). Stereo: the ES7210's two mics.
+  usb  the board streams its mic over the USB console nonstop (field/usb_stream.py); the
+       laptop cuts each clip out of the stream and finds where its playback starts in it by
+       cross-correlation. Mono. The whole stream is also saved (stream.wav).
+
+--auto: no prompts. Records the noise floor, then TTS clips until --rounds or --minutes (or
+Ctrl-C), with --bed-secs of background only every --bed-every clips (for noise augmentation).
 
 Each session starts with a few seconds of silence (the room's noise floor). --noise-bed
 records only background noise (no speech) for training-time augmentation.
@@ -20,7 +32,8 @@ Output (data/, git-ignored):
     data/field/sessions/<session>/NN-human.wav, NN-tts-<voice>.wav, noise.wav, session.json
     data/field/manifest.jsonl        one line per speech clip (text, split, levels, ...)
     data/field/noise.jsonl           one line per noise-only clip
-WAVs are 16 kHz stereo int16: the board's two mics (channel 0 = the mic stt uses).
+WAVs are 16 kHz int16: stereo from the MicroPython link (the board's two mics; channel 0 =
+the mic stt uses), mono from the usb link.
 """
 import argparse
 import datetime
@@ -40,6 +53,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "datagen"))
 from tts import Voices  # noqa: E402
+from usb_stream import align  # noqa: E402
 
 DATA = ROOT / "data/field"
 PROMPTS = DATA / "prompts.jsonl"
@@ -294,7 +308,7 @@ def main():
     ap.add_argument("--speaker-distance", type=float, default=None, help="laptop speaker -> board, meters")
     ap.add_argument("--location", default="")
     ap.add_argument("--notes", default="")
-    ap.add_argument("--rounds", type=int, default=5)
+    ap.add_argument("--rounds", type=int, default=None, help="prompts to record (default 5; with --auto, no limit)")
     ap.add_argument("--gain", type=int, default=10, help="ES7210 mic gain 0-14 (~3 dB/step)")
     ap.add_argument("--noise-secs", type=float, default=6.0, help="noise-floor capture at session start")
     ap.add_argument("--noise-bed", type=float, default=0, help="record only background noise for this many seconds")
@@ -303,6 +317,9 @@ def main():
     ap.add_argument("--sources", nargs="*", choices=SOURCES, help="only prompts from these sources (e.g. terms)")
     ap.add_argument("--retake", action="store_true", help="re-record prompts the model got wrong (new voice/speed)")
     ap.add_argument("--hard", action="store_true", help="prompts containing words the model gets wrong")
+    ap.add_argument("--test-only", action="store_true",
+                    help="only test-split prompts: clips that are never trained on, to judge a fine-tuned "
+                         "model (e.g. your own voice in a new place)")
     ap.add_argument("--include-test", action="store_true",
                     help="let --retake/--hard use test prompts too (default: train only, so the test set "
                          "doesn't drift toward the hardest material and scores stay comparable over time)")
@@ -311,22 +328,41 @@ def main():
     ap.add_argument("--board", default="waveshare-s3cam")
     ap.add_argument("--mic", default="es7210")
     ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--link", choices=["mpy", "usb"], default="mpy",
+                    help="mpy: MicroPython board, audio over WiFi; usb: mic streamed over USB (mic_stream)")
+    ap.add_argument("--auto", action="store_true", help="hands free: TTS only, no prompts")
+    ap.add_argument("--minutes", type=float, default=None, help="stop after this long (with --auto)")
+    ap.add_argument("--bed-every", type=int, default=10, help="--auto: background-only recording every N clips (0: never)")
+    ap.add_argument("--bed-secs", type=float, default=8.0)
     a = ap.parse_args()
-
+    if a.auto:
+        a.no_human, a.no_tts = True, False
+    if a.rounds is None:
+        a.rounds = 10000 if a.auto else 5            # --auto: until --minutes or Ctrl-C
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     sid = f"{stamp}-{re.sub(r'[^a-z0-9]+', '-', a.condition.lower()).strip('-')}"
     sdir = DATA / "sessions" / sid
     sdir.mkdir(parents=True, exist_ok=True)
     meta = {"session": sid, "condition": a.condition, "noise": a.noise, "distance_m": a.distance,
             "speaker_distance_m": a.speaker_distance, "location": a.location, "notes": a.notes,
-            "board": a.board, "mic": a.mic, "gain": a.gain, "started": stamp}
+            "board": a.board, "mic": a.mic, "gain": a.gain if a.link == "mpy" else None,
+            "link": a.link, "started": stamp}
     print(f"{BOLD}session {sid}{RESET}  {DIM}connecting to the board...{RESET}")
-    board = Board(a.port, a.gain)
+    if a.link == "usb":
+        from usb_stream import UsbStreamBoard
+        board = UsbStreamBoard(a.port, stream_wav=sdir / "stream.wav",
+                               log=lambda m: print(f"{DIM}   board: {m}{RESET}"))
+    else:
+        board = Board(a.port, a.gain)
+    n = 0
     try:
         if a.noise_bed:
             record_noise_bed(board, a, meta, sdir)
             return
-        input(f"\n{BOLD}Noise floor:{RESET} stay quiet for {a.noise_secs:g} s (leave the noise source running). Enter to start ")
+        if not a.auto:
+            input(f"\n{BOLD}Noise floor:{RESET} stay quiet for {a.noise_secs:g} s (leave the noise source running). Enter to start ")
+        else:
+            print(f"{BOLD}Noise floor:{RESET} {a.noise_secs:g} s")
         nz = board.record(a.noise_secs)
         sf.write(sdir / "noise.wav", nz, RATE, subtype="PCM_16")
         meta["noise_dbfs"] = round(dbfs(nz[:, 0]), 1)
@@ -343,12 +379,21 @@ def main():
         elif a.hard:
             pick = hard_picker(targeted)
         else:
-            pick = picker(load_prompts(), seed=sid, sources=a.sources)
+            pool = load_prompts()
+            if a.test_only:
+                pool = [p for p in pool if p["split"] == "test"]
+            pick = picker(pool, seed=sid, sources=a.sources)
         import random
         srng = random.Random(sid + "speed")
         lo, hi = (float(x) for x in a.tts_speed.split(","))
-        n = 0
+        t_start, beds = time.monotonic(), 0
         for r in range(a.rounds):
+            if a.minutes is not None and time.monotonic() - t_start > a.minutes * 60:
+                print(f"{DIM}{a.minutes:g} minutes: done{RESET}")
+                break
+            if a.auto and a.bed_every and r and r % a.bed_every == 0:
+                beds += 1
+                record_bed(board, a, meta, sdir, beds, a.bed_secs)
             p = next(pick)
             print(f"\n{BOLD}[{r + 1}/{a.rounds}]{RESET} {DIM}{p['source']}, ~{p['bucket']} s, {p['split']}{RESET}")
             print(f"\n    {BOLD}{p['display']}{RESET}\n")
@@ -379,16 +424,30 @@ def main():
                 pcm = board.record(len(tts) / RATE + 1.5, on_start=lambda: procs.append(play_async(win)))
                 for pr in procs:
                     pr.wait()
+                extra = {}
+                if a.link == "usb":                 # cut the clip to where the playback is
+                    st, en, score = align(pcm[:, 0], tts)
+                    extra = {"align_score": score, "lost_samples": int(board.last_lost),
+                             "stream_at": int(board.last_at)}
+                    if score >= 4:
+                        pcm = pcm[st:en]
+                        extra["stream_at"] += st
+                    else:
+                        print(f"  {YEL}couldn't find the playback in the recording (score {score}): kept whole{RESET}")
+                    if board.last_lost:
+                        print(f"  {YEL}{board.last_lost / RATE:.2f} s of audio lost on the USB link{RESET}")
                 lv = levels(pcm, meta["noise_dbfs"])
                 show_levels(lv)
                 n += 1
-                save(sdir, n, f"tts-{voice}", pcm, p, meta, lv, tts_speed=speed)
+                save(sdir, n, f"tts-{voice}", pcm, p, meta, lv, tts_speed=speed, **extra)
+    except KeyboardInterrupt:
+        print(f"\n{DIM}stopped{RESET}")
+    finally:
         meta["clips"] = n
         (sdir / "session.json").write_text(json.dumps(meta, indent=2))
-        print(f"\n{GREEN}saved {n} clips -> {sdir.relative_to(ROOT)}{RESET}")
-        print(f"{DIM}score it: cd export && uv run field_eval.py --session {sid}{RESET}")
-    finally:
         board.close()
+    print(f"\n{GREEN}saved {n} clips -> {sdir.relative_to(ROOT)}{RESET}")
+    print(f"{DIM}score it: cd export && uv run field_eval.py --session {sid}{RESET}")
 
 
 def save(sdir, n, speaker, pcm, p, meta, lv, **extra):
@@ -401,6 +460,16 @@ def save(sdir, n, speaker, pcm, p, meta, lv, **extra):
                       "secs": round(len(pcm) / RATE, 2), **lv, **extra,
                       **{k: meta[k] for k in ("session", "condition", "noise", "distance_m", "speaker_distance_m",
                                               "board", "mic", "gain", "noise_dbfs")}})
+
+
+def record_bed(board, a, meta, sdir, i, secs):
+    """A few seconds of background only, between clips (--auto)."""
+    pcm = board.record(secs)
+    name = f"bed-{i:03d}.wav"
+    sf.write(sdir / name, pcm, RATE, subtype="PCM_16")
+    db = round(dbfs(pcm[:, 0]), 1)
+    append(NOISE, {**meta, "file": str((sdir / name).relative_to(DATA)), "secs": secs, "kind": "bed", "dbfs": db})
+    print(f"{DIM}   background only, {secs:g} s: {db} dBFS{RESET}")
 
 
 def record_noise_bed(board, a, meta, sdir):

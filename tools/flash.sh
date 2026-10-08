@@ -18,7 +18,7 @@ if [ -z "$want" ]; then
     exit 2
 fi
 [ $# -ge 2 ] || { sed -n '2,11p' "$0" >&2; exit 2; }
-command -v esptool.py >/dev/null || [ -n "$IDF_PATH" ] || . "${IDF_PATH:-$HOME/build/lvgl_micropython/lib/esp-idf}/export.sh" >/dev/null
+python -c "import esptool" 2>/dev/null || . "${IDF_PATH:-$HOME/build/lvgl_micropython/lib/esp-idf}/export.sh" >/dev/null
 have=$(python -m esptool --chip esp32s3 -p "$PORT" read_mac 2>/dev/null | sed -n 's/^MAC: *//p' | head -1)
 norm() { echo "$1" | tr 'A-F' 'a-f' | tr -d ' '; }
 if [ -z "$have" ]; then

@@ -150,6 +150,7 @@ def main():
     ap.add_argument("--split", default="test", choices=["test", "train", "all"])
     ap.add_argument("--session", nargs="*", help="only these sessions")
     ap.add_argument("--condition", nargs="*", help="only these conditions")
+    ap.add_argument("--who", choices=["human", "tts"], help="only your voice, or only the laptop voices")
     ap.add_argument("--legacy", action="store_true", help="also score data/recordings")
     ap.add_argument("--models", nargs="*", default=["float", "int8", "int4"])
     ap.add_argument("--mmrt", nargs="*", default=[], help="extra .mmrt files to score")
@@ -159,6 +160,8 @@ def main():
     a = ap.parse_args()
 
     items = load_items(a)
+    if a.who:
+        items = [r for r in items if r.get("who") == a.who]
     if not items:
         raise SystemExit("no recordings match (capture some with field/capture.py, or try --split all)")
     build()
@@ -177,6 +180,8 @@ def main():
     for key, fmt in (("condition", "{}"), ("who", "speaker {}"), ("bucket", "~{} s clips"), ("source", "{} text")):
         for i, r in enumerate(items):
             groups.setdefault(fmt.format(r.get(key)), []).append(i)
+    for i, r in enumerate(items):               # each condition split by voice: human speech apart
+        groups.setdefault(f"{r.get('condition')} / {r.get('who')}", []).append(i)
     loose = [i for i, r in enumerate(items) if r.get("loose")]
     if loose:                                   # tech tokens whose reading is a best guess
         groups["loose refs (x86, 4K, ...)"] = loose

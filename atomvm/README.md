@@ -298,9 +298,9 @@ capture start/read/stop, play, an underrun count) and build with
 board-independent; `board_audio.c` is a worked example. In a custom build, `audio_config/0,1`
 return `{error, custom_board}` and `audio_presets/0` returns `[]`.
 
-Two custom drivers run in Watchtower: the T-LoRa Pager's (ES8311 and an amp on an XL9555,
-written before run-time configuration: the built-in driver could probably now do it with a
-map) and the CrowPanel's PDM mic. What they taught us:
+We have written two custom drivers: one for the T-LoRa Pager (ES8311 and an amp on an
+XL9555, written before run-time configuration: the built-in driver could probably now do it
+with a map) and one for the CrowPanel's PDM mic. What they taught us:
 
 - `board_audio_rx_read` fills every frame and returns **0**, not the number of frames: any
   other value is taken as an error.
@@ -503,7 +503,7 @@ replies, with chimes between the phases.
 | `audio` | `none` | the board, as `babytalk:audio_config/1` takes it (a preset name or a map); `none` leaves the board in use alone |
 | `spellings` | `[]` | the wake phrase's spellings; `[]` = no wake phrase: the listener chimes and waits for `ask/3` or `wake_on/2` |
 | `threshold` | `-21.0` | wake when the phrase's score is at least this (from `export/kws.py`) |
-| `window_ms` / `every_ms` | `4000` / `1000` | the audio scored for the phrase, and how often. A short phrase does better with a short window scored often: Watchtower uses `1500` / `500` (quicker to transcribe, and the phrase lands whole in one window) |
+| `window_ms` / `every_ms` | `4000` / `1000` | the audio scored for the phrase, and how often. A short phrase does better with a short window scored often, e.g. `1500` / `500` (quicker to transcribe, and the phrase lands whole in one window) |
 | `vad` | `true` | score only after something louder than the room was heard (a transcription takes both cores for 0.3-1.5 s) |
 | `vad_factor` / `vad_min` | `2` / `200` | "louder": this many times the noise floor, and at least this RMS |
 | `silence_ms` | `700` | quiet after speech that ends a message |
@@ -695,8 +695,8 @@ Firmware options (`idf.py menuconfig`, or lines in `sdkconfig.babytalk*`):
 | `CONFIG_SRAM_POOL_IN_PSRAM` | n (y on the P4) | the engines' pool in PSRAM (right on the P4, where only synthesis uses it) |
 | `CONFIG_BABYTALK_YIELD` | n | speech work runs at the AtomVM schedulers' priority instead of above them, so the VM keeps running during a transcription (for a board with a screen) |
 
-**Fitting next to WiFi, a camera or a screen.** Internal RAM is what runs out. What the
-Watchtower boards use, roughly in order of payoff:
+**Fitting next to WiFi, a camera or a screen.** Internal RAM is what runs out. What has worked
+for us, roughly in order of payoff:
 
 - `CONFIG_SRAM_POOL_IN_PSRAM=y` and `CONFIG_BABYTALK_STACKS_IN_PSRAM=y`: about 100 KB of
   internal RAM back, a little slower. On the S3-CAM with WiFi up: 97 KB free instead of 22.

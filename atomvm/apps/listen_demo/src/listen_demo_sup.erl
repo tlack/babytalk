@@ -9,10 +9,18 @@
                     <<"wake up to marto face from">>, <<"wake up to matle face">>, <<"wake up to midto face">>,
                     <<"wake up tomato faceo">>, <<"wake up tomato face a">>, <<"wake up tomato face f">>]).
 
+%% BABYTALK_BOARD at build time (mix.exs) picks the audio board; else the firmware's default
+-ifdef(BOARD).
+-define(AUDIO, #{audio => ?BOARD}).
+-else.
+-define(AUDIO, #{}).
+-endif.
+
 start_link() -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    Listener = #{spellings => ?SPELLINGS, threshold => -21.0, notify => listen_demo_responder},
+    Listener = maps:merge(#{spellings => ?SPELLINGS, threshold => -21.0, notify => listen_demo_responder},
+                          ?AUDIO),
     {ok, {#{strategy => rest_for_one, intensity => 5, period => 60},
           [#{id => responder, start => {listen_demo_responder, start_link, []}},
            #{id => listener, start => {babytalk_listener, start_link, [babytalk_listener, Listener]}}]}}.

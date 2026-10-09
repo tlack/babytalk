@@ -11,11 +11,11 @@ handle_call(_R, _F, S) -> {reply, ok, S}.
 handle_cast(_M, S) -> {noreply, S}.
 
 handle_info({babytalk_listener, {heard, Text, Score}}, S) ->
-    io:format("  heard ~p (score ~p)~n", [Text, Score]), {noreply, S};
+    log("  heard ~p (score ~p)", [Text, Score]), {noreply, S};
 handle_info({babytalk_listener, {wake, _Text, Score}}, S) ->
-    io:format("AWAKE (score ~p) -- listening for a command~n", [Score]), {noreply, S};
+    log("AWAKE (score ~p) -- listening for a command", [Score]), {noreply, S};
 handle_info({babytalk_listener, {command, Text}}, S) ->
-    io:format("COMMAND ~p~n", [Text]),
+    log("COMMAND ~p", [Text]),
     Reply = case Text of
                 <<>> -> <<"Sorry, I didn't catch that.">>;
                 _ -> [<<"You said: ">>, Text]
@@ -23,6 +23,10 @@ handle_info({babytalk_listener, {command, Text}}, S) ->
     babytalk_listener:say(babytalk_listener, Reply),
     {noreply, S};
 handle_info({babytalk_listener, {said, Text}}, S) ->
-    io:format("SAID ~p~n~n", [Text]), {noreply, S};
+    log("SAID ~p~n", [Text]), {noreply, S};
 handle_info({babytalk_listener, Other}, S) ->
-    io:format("  ~p~n", [Other]), {noreply, S}.
+    log("  ~p", [Other]), {noreply, S}.
+
+%% Each line stamped with milliseconds since boot, to read latencies off the serial log.
+log(Fmt, Args) ->
+    io:format("[~b] " ++ Fmt ++ "~n", [erlang:monotonic_time(millisecond) | Args]).

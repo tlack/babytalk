@@ -40,7 +40,7 @@ Most "voice on ESP32" projects do one of two things:
   (e.g. ESP-SR's MultiNet, Edge Impulse / TensorFlow Lite Micro keyword spotting).
 
 BabyTalk is different: a **general-purpose English speech recognizer** that runs
-entirely on the chip. It writes down *any* sentence, with no training and no command list.
+entirely on the chip. It transcribes *any* sentence, with no training and no command list.
 A wake phrase is any phrase you type ("wake up, tomato face"), also with no training.
 Optionally the same firmware **speaks** replies with an on-device neural voice.
 

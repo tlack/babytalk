@@ -15,6 +15,7 @@ import multiprocessing as mp
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 
@@ -53,7 +54,8 @@ def _pump(port, q, stop):
 
 class UsbStreamBoard:
     def __init__(self, port, stream_wav=None, log=print):
-        ctx = mp.get_context("spawn")
+        # fork where it's safe (Linux): spawn re-runs the caller's script, which fails from a REPL
+        ctx = mp.get_context("fork" if sys.platform.startswith("linux") else "spawn")
         self.q = ctx.Queue()
         self.pump_stop = ctx.Event()
         self.pump = ctx.Process(target=_pump, args=(port, self.q, self.pump_stop), daemon=True)
@@ -128,10 +130,14 @@ class UsbStreamBoard:
     def now(self):
         """Stream index of 'now'. The stream's sample count is the board's clock (lost lines
         are filled in); a chunk can arrive late (the reader was busy, USB buffering) but never
-        early, so host time = index / RATE + the smallest delay seen in the last minute."""
+        early, so host time = index / rate + the smallest delay seen in the last minute. The
+        rate is measured, not assumed: the host's clock can run off (WSL2's ran 4% fast after
+        the laptop slept), and 16000 per host second would then drift by seconds a minute."""
         with self.lock:
-            offset = min(t - i / RATE for t, i in self.arrivals)
-        return int((time.monotonic() - offset) * RATE)
+            arr = list(self.arrivals)
+        rate = host_rate(arr)
+        offset = min(t - i / rate for t, i in arr)
+        return int((time.monotonic() - offset) * rate)
 
     def span(self, a, b):
         """Samples [a, b) of the stream, and how many of them were lost (zeros)."""
@@ -169,6 +175,22 @@ class UsbStreamBoard:
             self.pump.terminate()
         if self.wav:
             self.wav.close()
+
+
+def host_rate(arrivals, bin_secs=1.0, min_span=8.0):
+    """Samples per host second, from (host time, stream index) arrivals: a line through the
+    earliest arrival in each second (the least-delayed ones). RATE until there's
+    enough history to beat the assumption."""
+    if len(arrivals) < 2 or arrivals[-1][0] - arrivals[0][0] < min_span:
+        return RATE
+    best = {}
+    for t, i in arrivals:
+        k = int(t // bin_secs)
+        if k not in best or t - i / RATE < best[k][0] - best[k][1] / RATE:
+            best[k] = (t, i)
+    t, i = np.array(list(best.values()), dtype=np.float64).T
+    rate = np.polyfit(t, i, 1)[0]
+    return rate if 0.8 * RATE < rate < 1.2 * RATE else RATE
 
 
 def align(rec, ref, before=0.25, after=0.6):

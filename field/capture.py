@@ -347,6 +347,8 @@ def main():
             "speaker_distance_m": a.speaker_distance, "location": a.location, "notes": a.notes,
             "board": a.board, "mic": a.mic, "gain": a.gain if a.link == "mpy" else None,
             "link": a.link, "started": stamp}
+    voices = Voices()
+    specs = voices.specs(n_multi=30)   # before the board: loading every voice takes seconds and can stall USB
     print(f"{BOLD}session {sid}{RESET}  {DIM}connecting to the board...{RESET}")
     if a.link == "usb":
         from usb_stream import UsbStreamBoard
@@ -370,8 +372,6 @@ def main():
         append(NOISE, {**meta, "file": str((sdir / "noise.wav").relative_to(DATA)), "secs": a.noise_secs,
                        "kind": "floor"})
 
-        voices = Voices()
-        specs = voices.specs(n_multi=30)
         vi = int(hashlib.sha1(sid.encode()).hexdigest(), 16) % len(specs)
         targeted = [p for p in load_prompts() if a.include_test or p["split"] == "train"]
         if a.retake:
@@ -432,10 +432,11 @@ def main():
                     if score >= 4:
                         pcm = pcm[st:en]
                         extra["stream_at"] += st
+                        extra["lost_samples"] = int(board.span(extra["stream_at"], extra["stream_at"] + len(pcm))[1])
                     else:
                         print(f"  {YEL}couldn't find the playback in the recording (score {score}): kept whole{RESET}")
-                    if board.last_lost:
-                        print(f"  {YEL}{board.last_lost / RATE:.2f} s of audio lost on the USB link{RESET}")
+                    if extra["lost_samples"]:
+                        print(f"  {YEL}{extra['lost_samples'] / RATE:.2f} s of this clip lost on the USB link{RESET}")
                 lv = levels(pcm, meta["noise_dbfs"])
                 show_levels(lv)
                 n += 1

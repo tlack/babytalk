@@ -16,9 +16,9 @@ from pathlib import Path
 
 import numpy as np
 
-from citrinet import DATA
+from citrinet import MODELS
 
-MMRT = DATA / "models" / "mmrt"
+MMRT = MODELS / "mmrt"
 INFO = MMRT / "citrinet256_int8.info"
 ONNX = MMRT / "citrinet256_static1600_cle.onnx"  # the (simplified) graph ESP-PPQ quantized
 

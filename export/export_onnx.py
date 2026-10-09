@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from citrinet import DATA, MODEL_DIR, fold_bn, load_model, load_split, read_audio
+from citrinet import MODELS, MODEL_DIR, fold_bn, load_model, load_split, read_audio
 from evalwer import fixed_windows
 
 
@@ -125,7 +125,8 @@ def main():
     ap.add_argument("--cle", action="store_true", help="equalize dw->pw weight ranges (exact rewrite)")
     a = ap.parse_args()
     sm, m, feat, vocab = build(a.win, cle=a.cle)
-    out = DATA / "models" / f"citrinet256_static{a.win}{'_cle' if a.cle else ''}.onnx"
+    MODELS.mkdir(parents=True, exist_ok=True)
+    out = MODELS / f"citrinet256_static{a.win}{'_cle' if a.cle else ''}.onnx"
     x = torch.randn(1, 80, a.win)
     torch.onnx.export(sm, (x,), str(out), opset_version=18, input_names=["feats"], output_names=["logits"],
                       dynamo=False, do_constant_folding=True)

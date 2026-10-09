@@ -87,7 +87,7 @@ def _calib(items):
 
 def calibrate(img, n_clips, jobs):
     """-> {tensor id: (E[x x^T], E[x])} over n_clips dev-clean clips (cached on disk)."""
-    cache = E.RES / f"int4_calib{n_clips}.npz"
+    cache = E.OUT / f"int4_calib{n_clips}.npz"  # inputs depend on the model
     if cache.exists():
         z = np.load(cache)
         return {int(k[1:]): (z[k], z["m" + k[1:]]) for k in z.files if k[0] == "H"}
@@ -209,7 +209,7 @@ def main():
            f"{'_nobc' if a.no_bias_corr else ''}")
     path = E.OUT / f"citrinet256_cb4_{tag}.mmrt"
     path.write_bytes(bytes(b))
-    row = {"variant": tag, "calib": a.calib, "rel_weight_err": round((err / num) ** 0.5, 4), "bias_clipped": clipped}
+    row = {"variant": tag, "ckpt": E.CKPT, "calib": a.calib, "rel_weight_err": round((err / num) ** 0.5, 4), "bias_clipped": clipped}
     sets = {"test-clean": load_split()[:: a.every]}
     if a.recordings:
         from recordings import load_recordings

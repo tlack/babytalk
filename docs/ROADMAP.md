@@ -14,11 +14,16 @@ recordings with background noise, full-precision word error rate went from 46% t
 `export/field_eval.py`). Blocked on data: a few hundred more voice recordings in different
 environments, so the model generalizes rather than learning one room.
 
-**Then:** thread a `--ckpt` option through `export/export_onnx.py` and `export/mmrt_quant.py`
-(they load NVIDIA's original weights today), build the int8 and int4 images, score them with
-`field_eval.py --mmrt`, check them on the board, and publish them next to the originals in
-`models/` (CC-BY-4.0 attribution carries over). No firmware change. See
-[MODELS.md](MODELS.md#2-your-own-fine-tuned-variant).
+**Conversion works:** `CITRINET_CKPT=<model.pt>` runs the export scripts on a fine-tuned
+checkpoint. A first fine-tuned 4-bit model (2026-10-09) runs on the LilyGO T-LoRa Pager: field
+test word error rate 42.7% against 58.1% for the stock 4-bit model, but LibriSpeech test-clean
+11.8% against 8.2%. Fine-tuning cost some clean-speech accuracy, and 4-bit quantization made
+that worse.
+
+**Then:** more varied recordings, then a training mix that keeps clean-speech accuracy (more
+LibriSpeech weight, or blending with the original weights). Then publish the int8 and int4
+images next to the originals in `models/` (CC-BY-4.0 attribution carries over). No firmware
+change. See [MODELS.md](MODELS.md#2-your-own-fine-tuned-variant).
 
 ## 2. Win back the int8/int4 accuracy loss (quantization-aware training)
 

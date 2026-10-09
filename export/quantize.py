@@ -18,15 +18,13 @@ import time
 import torch
 
 import evalwer
-from citrinet import DATA, load_model, load_split, read_audio
+from citrinet import MODELS, load_model, load_split, read_audio
 from evalwer import RESULTS, WIN, fixed_windows, score
 
 from esp_ppq.api import espdl_quantize_onnx, get_target_platform  # noqa: E402
 from esp_ppq.api.setting import QuantizationSettingFactory  # noqa: E402
 from esp_ppq.core import TargetPlatform  # noqa: E402
 from esp_ppq.executor import TorchExecutor  # noqa: E402
-
-MODELS = DATA / "models"
 
 
 def calib_windows(feat, n: int, split="dev-clean"):

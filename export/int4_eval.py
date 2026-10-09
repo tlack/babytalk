@@ -24,11 +24,11 @@ import time
 
 import numpy as np
 
-from citrinet import DATA, ctc_greedy, load_model, load_split, read_audio
+from citrinet import CKPT, DATA, ctc_greedy, load_model, load_split, read_audio
 from evalwer import fixed_windows, out_len, score
 from mmrt_check_model import ALLOC, FREE, LIB, MODEL, build
+from mmrt_info import MMRT as OUT
 
-OUT = DATA / "models" / "mmrt"
 RES = DATA / "results"
 
 

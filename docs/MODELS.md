@@ -64,19 +64,19 @@ stay the same, so **the result is just another `.mmrt` file: no firmware change*
    and your recordings, with recorded noise added). Blending with the original weights trades
    noisy-room accuracy against clean-speech accuracy. The result is a PyTorch checkpoint.
 3. **Score** it before converting: `export/field_eval.py --float-ckpt <checkpoint>`.
-4. **Convert** to the board's format (from `export/`):
+4. **Convert** to the board's format (from `export/`). `CITRINET_CKPT` points the scripts at
+   your checkpoint; their files then go in an `export/` directory beside it:
 
    ```bash
+   export CITRINET_CKPT=$PWD/../data/train/runs/<run>/model.pt
    uv run export_onnx.py --cle && uv run mmrt_quant.py && uv run mmrt_export.py    # int8
-   uv run int4_gptq.py --keep-io                                                    # 4-bit weights
-   uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o my_int4.mmrt
+   uv run mmrt_check_model.py                                    # C runtime bit-exact with the graph
+   uv run int4_gptq.py --keep-io                                 # 4-bit weights (~20 min)
+   D=../data/train/runs/<run>/export/mmrt
+   uv run mmrt_cb4.py $D/citrinet256_cb4_gptq16_io.mmrt -o $D/citrinet256_int4.mmrt
    ```
 
-   **Not wired up yet:** these scripts currently always load NVIDIA's original checkpoint
-   (`citrinet.load_model()`); only `field_eval.py` takes a fine-tuned one. Converting a
-   fine-tuned model needs a `--ckpt` option threaded through `export_onnx.py` and
-   `mmrt_quant.py`. It's a small change, and the first step toward shipping the fine-tuned
-   model (see [ROADMAP.md](ROADMAP.md)).
+   Without `CITRINET_CKPT` the same commands rebuild the stock models from NVIDIA's weights.
 5. **Check** the converted file on the PC (`field_eval.py --mmrt my_int4.mmrt` runs the same
    C code as the board, bit for bit) and on the board (`export/mmrt_check_device.py`), then
    flash it as in section 1.

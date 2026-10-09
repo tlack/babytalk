@@ -24,6 +24,11 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 MODEL_DIR = DATA / "models" / "citrinet_256_ls"
+# CITRINET_CKPT=<train/finetune.py's model.pt> converts a fine-tuned model instead of NVIDIA's:
+# load_model() applies its weights, and the conversion files (ONNX, int8 graph, .mmrt) go in
+# an export/ directory beside it instead of data/models.
+CKPT = os.environ.get("CITRINET_CKPT")
+MODELS = Path(CKPT).resolve().parent / "export" if CKPT else DATA / "models"
 LIBRI = DATA / "librispeech" / "LibriSpeech"
 
 
@@ -194,6 +199,8 @@ def load_model(model_dir: Path = MODEL_DIR):
     m = Citrinet(cfg)
     missing, unexpected = m.load_state_dict(map_state_dict(sd, cfg), strict=True)
     assert not missing and not unexpected
+    if CKPT:
+        m.load_state_dict(torch.load(CKPT, map_location="cpu"))
     m.eval()
     feat = MelFeatures(cfg["preprocessor"], sd["preprocessor.featurizer.window"], sd["preprocessor.featurizer.fb"])
     vocab = list(cfg["decoder"]["vocabulary"])

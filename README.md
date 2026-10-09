@@ -3,7 +3,7 @@
 ![BabyTalk: small AI models for speech to text and text to speech on ESP32 microcontrollers](docs/babytalk-splash.png)
 
 **BabyTalk** makes an ESP32-S3 or ESP32-P4 that **understands what you say and talks back,
-with no cloud and no internet**, from C, MicroPython, or Erlang and Elixir on AtomVM:
+with no cloud and no internet**, from C, MicroPython, or Erlang/Elixir on AtomVM:
 
 ```python
 import stt, tts

@@ -3,8 +3,8 @@
 //   rec [secs] [gain]      defaults 5 s, PGA gain 14 (0..14, ~3dB/step, 14 = max)
 //
 // 16 kHz, 16-bit, stereo (mic 1 = left, mic 2 = right) -- the rate Citrinet wants.
-// Sequence and register values are ported from Watchtower's proven es7210.py /
-// audio.py: expander P6 raises the audio rail (PA on P4 stays off), then the ES7210
+// Sequence and register values are the same as our MicroPython driver
+// (mpy/drivers/es7210.py): expander P6 raises the audio rail (PA on P4 stays off), then the ES7210
 // is configured over I2C, then I2S RX with MCLK = 256*Fs. STEREO only: MONO is
 // known to garble this codec pair.
 //

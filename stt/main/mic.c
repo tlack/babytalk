@@ -1,6 +1,6 @@
 // Waveshare S3 cam ES7210 dual-mic capture, kept open between recordings.
-// Register sequence and pins ported verbatim from bench/main/bench_rec.c (itself a port
-// of Watchtower's proven es7210.py): expander P6 raises the audio rail, ES7210 over
+// Register sequence and pins ported verbatim from bench/main/bench_rec.c (the same
+// sequence as mpy/drivers/es7210.py): expander P6 raises the audio rail, ES7210 over
 // I2C, I2S RX STEREO (MONO garbles this codec pair), MCLK = 256*Fs.
 //
 // ES7210 register sequence derived from Espressif's es7210 driver (github.com/espressif/

@@ -2,13 +2,15 @@
 
 ![BabyTalk: small AI models for speech to text and text to speech on ESP32 microcontrollers](docs/babytalk-splash.png)
 
-**BabyTalk** makes an ESP32-S3 or ESP32-P4 that **understands what you say and talks back,
-with no cloud and no internet**, from C, MicroPython, or Erlang/Elixir on AtomVM:
+**BabyTalk** is a software library that lets an ESP32-S3 or ESP32-P4 **understand what you
+say and talk back, with no cloud and no internet**, from C, MicroPython, or Erlang/Elixir on
+AtomVM:
 
 ```python
 import stt, tts
 text = stt.transcribe(pcm)                 # 16 kHz audio -> "what's the weather like today"
 audio = tts.say("You said: " + text)       # text -> 24 kHz audio for the speaker
+# lcd.text(text, 0, 0)                     # or send the text anywhere: a screen, LoRa, MQTT...
 ```
 
 **Memory, bottom line:** speech to text needs **6 MB of flash** and **84.5 KB of internal

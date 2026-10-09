@@ -49,9 +49,21 @@ esptool.py --chip esp32s3 write_flash 0x490000 models/citrinet256_int4.mmrt   # 
 ```
 
 Or, from MicroPython, install a model from the SD card or the board's filesystem without a
-computer: `mpy/examples/model_tools.py` (`model_tools.install("/sd/citrinet256_int4.mmrt")`
-copies, verifies and resets). The format (int8 or 4-bit, per layer) is recorded in the file,
-so the firmware needs no setting either way.
+computer: `mpy/examples/model_tools.py` copies it into flash, verifies it and resets the board.
+The format (int8 or 4-bit, per layer) is recorded in the file, so the firmware needs no
+setting either way.
+
+```python
+import machine, os, model_tools
+os.mount(machine.SDCard(), "/sd")                  # pins depend on your board
+model_tools.install("/sd/citrinet256_int4.mmrt")   # writes, verifies, resets the board
+model_tools.info()   # {'format': 'int4', 'bytes': 5991232, 'int4_layers': 146, 'partition_bytes': 6291456}
+```
+
+A model can't run straight from the SD card: the runtime reads the whole model on every
+transcription, from flash mapped into memory (~32 MB/s), and an SD card can't be mapped.
+Installing and verifying the 6 MB int4 model from the board's internal filesystem took 48
+seconds (from an SD card: not measured).
 
 ## 2. Your own fine-tuned variant
 

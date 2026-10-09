@@ -11,6 +11,23 @@ text = stt.transcribe(pcm)                 # 16 kHz audio -> "what's the weather
 audio = tts.say("You said: " + text)       # text -> 24 kHz audio for the speaker
 ```
 
+**Memory, bottom line:** speech to text needs **6 MB of flash** and **84.5 KB of internal
+RAM**; text to speech adds **1.9 MB of flash**. Each borrows a few hundred KB of **PSRAM**
+while it works.
+
+| | flash | PSRAM | internal RAM |
+|---|---|---|---|
+| **Speech to text** (4-bit model) | 6.0 MB: the model, read in place | 0.2 MB, transcribing 4 s (more for longer clips) | 84.5 KB, shared with text to speech |
+| **Text to speech** (nano voice) | 1.9 MB: voice 0.34 MB, pronunciations 1.5 MB | 0.5 MB, a 4 s reply | the same 84.5 KB |
+
+- The speech model is **never copied into RAM**: the chip reads it from flash as it runs.
+- The two take turns with one 84.5 KB block of internal RAM, and that block can live in
+  PSRAM instead (a little slower). Under MicroPython, text to speech also keeps 104 KB of
+  buffers in internal RAM; the AtomVM firmware puts them in PSRAM.
+- Bigger and better: the 8-bit speech model (9.8 MB of flash, more accurate), and on the
+  ESP32-P4 the much better-sounding `heart` voice (2.4 MB of flash, loaded into PSRAM).
+  Every option: [Models](#models). The full breakdown: [Performance and memory](#performance-and-memory).
+
 Made by Thomas Lackner and Claude Opus 5.5 (Anthropic). MIT licensed; the speech models
 belong to their authors (see [Credits and licenses](#credits-and-licenses)).
 
@@ -57,24 +74,133 @@ expert adapters for the speech model. They aren't used yet.)
     ([docs/BOARD_WAVESHARE_P4_WIFI6.md](docs/BOARD_WAVESHARE_P4_WIFI6.md))
   - **LilyGO T-LoRa Pager** (ES8311), from AtomVM, with its own audio driver
   - **Elecrow CrowPanel Advance 7.0"** (PDM mic), from AtomVM, speech to text only
-- **A microphone, for speech to text.** Anything that gives 16 kHz PCM. Memory: the 6 MB
-  model in flash (read in place, not copied to RAM), an 84.5 KB block of internal RAM
-  (or PSRAM), and ~0.2 MB of PSRAM while transcribing 4 s.
-- **A speaker, for text to speech** (optional). Memory: 1.9 MB more firmware in flash
-  (voice and pronunciation dictionary), ~104 KB of buffers (internal RAM under MicroPython,
-  PSRAM under AtomVM), and ~0.4 MB of PSRAM for a 4 s reply. It shares the 84.5 KB block
-  with speech to text, so the two take turns.
+- **A microphone**, for speech to text: anything that gives 16 kHz PCM.
+- **A speaker**, for text to speech (optional).
 - **To build:** Linux or WSL, [ESP-IDF v5.5.1](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/),
   and [uv](https://docs.astral.sh/uv/) for the Python tools. (AtomVM also needs
   Erlang/OTP 26+ and Elixir 1.17+.)
 
-The full memory breakdown is in [Performance and memory](#performance-and-memory).
+## Models
 
-## Language support
+### Speech to text
 
-All three share one engine (`components/`), and give the same transcripts.
+NVIDIA's [Citrinet-256](https://huggingface.co/nvidia/stt_en_citrinet_256_ls), compressed
+to 4 or 8 bits, in two versions: the original, and one fine-tuned for background noise.
+All four are ready to flash from [`models/`](models/) (SHA-256, licence and how each was made:
+[`models/README.md`](models/README.md)).
 
-**C (ESP-IDF).** Add `components/stt_engine` (with `mmrt` and `sram_pool`) and, for speech,
+| file | flash | noisy rooms* | clean speech** | fits |
+|---|---|---|---|---|
+| **`citrinet256_int4.mmrt`** (default) | **6.0 MB** | 58.1% | **8.2%** | the standard 6 MB model partition |
+| `citrinet256_int8.mmrt` | 9.8 MB | 51.5% | 6.3% | a 10 MB model partition |
+| `citrinet256_noisy_int4.mmrt` | 6.0 MB | 42.7% | 11.8% | the standard 6 MB model partition |
+| `citrinet256_noisy_int8.mmrt` | 9.8 MB | **33.8%** | 7.8% | a 10 MB model partition |
+
+Word error rate, lower is better. \*82 recordings made on the boards with music, highway
+noise or a coffee-shop loop in the background (see [Training for the real
+world](#training-for-the-real-world-work-in-progress)). \*\*LibriSpeech test-clean (clean,
+read English); the original full-precision model scores 3.8%.
+
+**The `noisy` models are an alternative, not an upgrade:** a quarter to a third fewer words
+wrong with noise in the room, more wrong on clean speech. Pick by where the board will
+listen. They are the same size as the originals, and need no firmware or code change: the
+file records its own format.
+
+Wake phrases need no model of their own: the speech model's output is scored against the
+phrase.
+
+### Text to speech
+
+| voice | flash | PSRAM | sounds* | runs on |
+|---|---|---|---|---|
+| **`nano`** (default), 294k parameters | 1.9 MB with the pronunciation dictionary | 0.5 MB | 2.13 | every board, compiled into the firmware |
+| **`heart`**, 2.27M parameters | 2.4 MB more, in its own partition | 2.4 MB more | **3.36** | ESP32-P4 only, at half real time |
+
+\*SCOREQ, a predicted listener rating (higher is better). Both are
+[sanoTTS](https://github.com/Ampixa/sanoTTS) voices; details and the 4-bit `heart4`:
+[`docs/TTS_VOICES.md`](docs/TTS_VOICES.md).
+
+**Building your own** (fine-tuning on your recordings, other languages, other voices):
+[`docs/MODELS.md`](docs/MODELS.md).
+
+## Quick start
+
+All three ways in share one engine (`components/`) and give the same transcripts.
+
+### MicroPython (ESP32-S3)
+
+A MicroPython v1.27.0 firmware with `stt` and `tts` modules. You bring the audio with
+`machine.I2S`; codec drivers for the ES7210 and ES8311 are in `mpy/drivers/`. Transcription
+can run in the background while asyncio keeps going, and a wake phrase is a list of
+spellings. Full API: [`mpy/README.md`](mpy/README.md).
+
+```python
+import stt
+stt.phrase(["wake up tomato face"])        # score every run for this phrase
+text = stt.transcribe(pcm)
+stt.last()["score"]                        # 0 = the phrase is the best reading
+```
+
+**1. Build the firmware** (MicroPython v1.27.0 with a small patch that lets `machine.I2S`
+drive the codec's master clock):
+
+```bash
+REPO=$PWD                                   # this repository
+. ~/esp/esp-idf/export.sh                   # wherever your ESP-IDF v5.5.1 lives
+mkdir -p ~/build/sentry-fw && cd ~/build/sentry-fw
+git clone --depth 1 -b v1.27.0 https://github.com/micropython/micropython
+git -C micropython apply $REPO/mpy/patches/micropython-i2s-mck.patch
+make -C micropython/ports/esp32 submodules
+git clone https://github.com/Ampixa/sanoTTS ~/build/tts/sanoTTS             # optional: text to speech,
+git -C ~/build/tts/sanoTTS checkout 18e26b2b365bff41d211e516b0760021451438f1  # at the audited commit
+cd $REPO && mpy/build.sh
+```
+
+**2. Flash** the firmware and a model, then clear the filesystem area once:
+
+```bash
+# a 6 MB model (default layout)
+esptool.py --chip esp32s3 write_flash 0x0 ~/build/sentry-fw/out/firmware-stt.bin \
+  0x410000 models/citrinet256_int4.mmrt
+esptool.py --chip esp32s3 erase_region 0xA10000 0x5F0000
+
+# or: a 9.8 MB model (int8 layout: same firmware, bigger model partition)
+esptool.py --chip esp32s3 write_flash 0x0 ~/build/sentry-fw/out/firmware-stt.bin \
+  0x410000 models/citrinet256_int8.mmrt
+esptool.py --chip esp32s3 write_flash 0x8000 ~/build/sentry-fw/out/partition-table-int8.bin
+esptool.py --chip esp32s3 erase_region 0xE10000 0x1F0000
+```
+
+**3. Try it**: press Enter, talk, and the board says back what it heard.
+
+```bash
+uv run --with mpremote tools/echo.py
+```
+
+`mpy/examples/` also has a wake-phrase demo, a speaker demo and `model_tools.py` (install a
+model from an SD card: [`docs/MODELS.md`](docs/MODELS.md#1-our-speech-models)).
+
+### AtomVM (Erlang and Elixir, ESP32-S3 and ESP32-P4)
+
+AtomVM v0.7 has no I2S driver yet, so BabyTalk brings its own audio drivers (ES7210, ES8311,
+a GPIO- or expander-switched amp). Pins and parts are chosen at run time, so there is one
+firmware per chip and your app picks a board preset or its own pins
+([boards and pins](atomvm/README.md#boards-and-pins)). It adds a supervised `gen_server`
+that listens for a wake phrase with audible chimes, and **MMRT** as a standalone library of
+int8/int4 vector kernels (matvec, matmul, top-k...) for any AtomVM project.
+
+```erlang
+ok = babytalk:audio_config(waveshare_s3_cam),       % or your own pins: a map
+{ok, Pcm} = babytalk:record(3),
+{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000),
+ok = babytalk:speak([<<"You said: ">>, Text]).
+```
+
+Build, flash and the demo apps: [`atomvm/README.md`](atomvm/README.md#quick-start).
+
+### C (ESP-IDF)
+
+Add `components/stt_engine` (with `mmrt` and `sram_pool`) and, for speech,
 `components/sanotts` to your ESP-IDF project. The engine maps the model from a `model`
 flash partition; you hand it 16 kHz PCM.
 
@@ -89,33 +215,6 @@ tts_say(r.text, 0.8f, &out, &n_out, NULL);   // 24 kHz PCM (in PSRAM) for your I
 Setup, build options and the full API: [`components/README.md`](components/README.md). The
 inference runtime on its own: [`mmrt/README.md`](mmrt/README.md).
 
-**MicroPython** (ESP32-S3). A MicroPython v1.27.0 firmware with `stt` and `tts` modules.
-You bring the audio with `machine.I2S`; codec drivers for the ES7210 and ES8311 are in
-`mpy/drivers/`. Transcription can run in the background while asyncio keeps going, and a
-wake phrase is a list of spellings. See [`mpy/README.md`](mpy/README.md).
-
-```python
-import stt
-stt.phrase(["wake up tomato face"])        # score every run for this phrase
-text = stt.transcribe(pcm)
-stt.last()["score"]                        # 0 = the phrase is the best reading
-```
-
-**AtomVM** (Erlang and Elixir, ESP32-S3 and ESP32-P4). AtomVM v0.7 has no I2S driver yet,
-so BabyTalk brings its own audio drivers (ES7210, ES8311, a GPIO- or expander-switched amp).
-Pins and parts are chosen at run time, so there is one firmware per chip and your app picks
-a board preset or its own pins ([boards and pins](atomvm/README.md#boards-and-pins)). It
-adds a supervised `gen_server` that listens for a wake phrase with audible chimes, and
-**MMRT** as a standalone library of int8/int4 vector kernels (matvec, matmul, top-k...) for
-any AtomVM project. See [`atomvm/README.md`](atomvm/README.md).
-
-```erlang
-ok = babytalk:audio_config(waveshare_s3_cam),       % or your own pins: a map
-{ok, Pcm} = babytalk:record(3),
-{ok, Text, _Info} = babytalk:transcribe_sync(Pcm, 10000),
-ok = babytalk:speak([<<"You said: ">>, Text]).
-```
-
 ## How it works
 
 ```
@@ -124,16 +223,13 @@ mic -> 16 kHz audio -> log-mel features -> Citrinet-256 (neural net) -> letters/
 text -> pronunciation dictionary -> phonemes -> sanoTTS voice -> 24 kHz audio -> speaker
 ```
 
-- **Speech to text** uses NVIDIA's [Citrinet-256](https://huggingface.co/nvidia/stt_en_citrinet_256_ls),
-  a 9.8-million-parameter recognizer trained on 960 hours of English audiobooks. It
-  outputs text directly ("CTC"), so it has no vocabulary list to maintain.
+- **Speech to text** uses NVIDIA's Citrinet-256, a 9.8-million-parameter recognizer
+  trained on 960 hours of English audiobooks. It outputs text directly ("CTC"), so it has
+  no vocabulary list to maintain.
 - **Wake phrases**: the same model output is scored against your phrase's spellings, so
   any phrase works. `export/kws_validate.py` checks a phrase against hours of other speech
   to pick a threshold that avoids false wakes.
-- **Text to speech** uses the 294k-parameter "nano" voice from
-  [sanoTTS](https://github.com/Ampixa/sanoTTS). It is optional: the firmware builds
-  without it. The ESP32-P4 can run sanoTTS's 2.27M-parameter "heart" voice instead, which
-  sounds much better, at half real time ([docs/TTS_VOICES.md](docs/TTS_VOICES.md)).
+- **Text to speech** uses a sanoTTS voice. It is optional: the firmware builds without it.
 
 ### MMRT, the runtime
 
@@ -160,7 +256,7 @@ size, with identical output:
 Details, a C usage example and the measurements behind each design choice:
 [`mmrt/README.md`](mmrt/README.md).
 
-### Quantization: fitting a 40 MB model into 6 MB
+### Quantization: fitting a 39 MB model into 6 MB
 
 The original model uses 32-bit floats (~39 MB). It is compressed twice:
 
@@ -169,50 +265,9 @@ The original model uses 32-bit floats (~39 MB). It is compressed twice:
    with GPTQ (an error-compensating method). The first and last layers stay 8-bit.
    Result: **6.0 MB**.
 
-Both are ready to use in [`models/`](models/). Word error rate on LibriSpeech test-clean
-(clean read English), lower is better:
-
-| model | file | size | word error rate |
-|---|---|---|---|
-| original (float) | | ~39 MB | 3.8% |
-| int8 | `models/citrinet256_int8.mmrt` | 9.8 MB | 6.3% |
-| **int4 (default)** | `models/citrinet256_int4.mmrt` | **6.0 MB** | **8.2%** |
-
-Real microphones in real rooms do worse than clean recordings; expect some misheard words.
-
-Your MicroPython code is the same for either model; the file records its own format.
-The difference is flash space: the int4 model fits the standard 6 MB model partition, and
-the int8 model needs the "int8 layout" (10 MB partition, see Install).
-
-```python
-import stt
-import model_tools                          # mpy/examples/model_tools.py
-
-model_tools.info()
-# int4: {'format': 'int4', 'bytes': 5991232, 'int4_layers': 146, 'partition_bytes': 6291456}
-# int8: {'format': 'int8', 'bytes': 9776192, 'int4_layers': 0, 'partition_bytes': 10485760}
-
-text = stt.transcribe(pcm)                  # same call either way
-```
-
-### Loading models from an SD card
-
-The runtime reads the model directly from **flash**, where it can be memory-mapped and
-read at ~32 MB/s. An SD card can't be memory-mapped, and every transcription reads the
-whole model, so running straight from SD would be much slower. (We haven't measured SD
-speed on this board.)
-
-What does work is keeping models on an SD card, or any MicroPython filesystem, and
-installing one into flash from MicroPython:
-
-```python
-import machine, os, model_tools
-os.mount(machine.SDCard(), "/sd")           # pins depend on your board
-model_tools.install("/sd/citrinet256_int4.mmrt")   # writes, verifies, resets the board
-```
-
-Tested from the board's internal filesystem (not an SD card): installing and verifying the
-6 MB int4 model took 48 seconds.
+Each step costs some accuracy (3.8% -> 6.3% -> 8.2% word error rate on clean speech; see
+[Models](#models)). Rebuilding them yourself, from NVIDIA's checkpoint or your own
+fine-tuned one: [`docs/MODELS.md`](docs/MODELS.md#2-your-own-fine-tuned-variant).
 
 ### What's where
 
@@ -227,12 +282,12 @@ Tested from the board's internal filesystem (not an SD card): installing and ver
 | `export/` | PC side: model port, quantization, the `.mmrt` exporter, bit-exact checks |
 | `train/`, `field/`, `datagen/` | fine-tuning, field recording sessions, synthetic speech |
 | `tools/` | laptop tools that drive a board over WiFi or USB (transcribe, record, wake phrases) |
-| `models/` | the int4 and int8 model images |
-| `docs/` | [`MODELS.md`](docs/MODELS.md) (using, building and replacing the models; other languages), [`ROADMAP.md`](docs/ROADMAP.md), board notes, project history |
+| `models/` | the speech models, ready to flash |
+| `docs/` | [`MODELS.md`](docs/MODELS.md) (using, building and replacing the models; other languages), [`ROADMAP.md`](docs/ROADMAP.md), [`BENCHMARKS.md`](docs/BENCHMARKS.md) (the ESP32-S3's memory and arithmetic speeds, a glossary), board notes, project history |
 
 ## Performance and memory
 
-Measured on the Waveshare ESP32-S3-CAM, from MicroPython, int4 model. Times include the
+Measured on the Waveshare ESP32-S3-CAM, from MicroPython, 4-bit model. Times include the
 audio feature step.
 
 **Speed**
@@ -254,12 +309,12 @@ are limited to about 4 s under MicroPython.
 
 | item | size |
 |---|---|
-| Firmware (total) | 3.6 MB |
-| of which MicroPython and the camera module | 1.7 MB |
-| of which text to speech (voice 0.34 MB, pronunciation dictionary 1.5 MB) | 1.9 MB |
-| Speech model, int4 | 6.0 MB |
-| Speech model, int8 (int8 layout) | 9.8 MB |
-| Left for your files, int4 layout | 6 MB |
+| Speech model, 4-bit | 6.0 MB |
+| Speech model, 8-bit (int8 layout) | 9.8 MB |
+| Text to speech: nano voice 0.34 MB, pronunciation dictionary 1.5 MB | 1.9 MB |
+| MicroPython itself, with the camera module | 1.7 MB |
+| The whole MicroPython firmware (MicroPython + text to speech) | 3.6 MB |
+| Left for your files, 4-bit layout | 6 MB |
 | Left for your files, int8 layout | 2 MB |
 
 **PSRAM (8 MB)**
@@ -276,64 +331,13 @@ are limited to about 4 s under MicroPython.
 | item | size |
 |---|---|
 | Shared block for listening / speaking (they take turns) | 84.5 KB |
-| Text to speech, permanent buffers | 104 KB |
+| Text to speech, permanent buffers (PSRAM under AtomVM) | 104 KB |
 | Free for your program | ~42 KB |
 
-Bluetooth is disabled in this firmware to make that room.
-
-## Install
-
-**1. Build the firmware** (MicroPython v1.27.0 with a small patch that lets `machine.I2S`
-drive the codec's master clock; more options in [`mpy/README.md`](mpy/README.md)):
-
-```bash
-REPO=$PWD                                   # this repository
-. ~/esp/esp-idf/export.sh                   # wherever your ESP-IDF v5.5.1 lives
-mkdir -p ~/build/sentry-fw && cd ~/build/sentry-fw
-git clone --depth 1 -b v1.27.0 https://github.com/micropython/micropython
-git -C micropython apply $REPO/mpy/patches/micropython-i2s-mck.patch
-make -C micropython/ports/esp32 submodules
-git clone https://github.com/Ampixa/sanoTTS ~/build/tts/sanoTTS             # optional: text to speech,
-git -C ~/build/tts/sanoTTS checkout 18e26b2b365bff41d211e516b0760021451438f1  # at the audited commit
-cd $REPO && mpy/build.sh
-```
-
-**2. Flash** the firmware and a model, then clear the filesystem area once:
-
-```bash
-# int4 model (default layout)
-esptool.py --chip esp32s3 write_flash 0x0 ~/build/sentry-fw/out/firmware-stt.bin \
-  0x410000 models/citrinet256_int4.mmrt
-esptool.py --chip esp32s3 erase_region 0xA10000 0x5F0000
-
-# or: int8 model (int8 layout: same firmware, bigger model partition)
-esptool.py --chip esp32s3 write_flash 0x0 ~/build/sentry-fw/out/firmware-stt.bin \
-  0x410000 models/citrinet256_int8.mmrt
-esptool.py --chip esp32s3 write_flash 0x8000 ~/build/sentry-fw/out/partition-table-int8.bin
-esptool.py --chip esp32s3 erase_region 0xE10000 0x1F0000
-```
-
-**3. Try it**: press Enter, talk, and the board says back what it heard.
-
-```bash
-uv run --with mpremote tools/echo.py
-```
-
-`mpy/examples/` also has a wake-phrase demo, a speaker demo and `model_tools.py`. The full
-MicroPython API is in [`mpy/README.md`](mpy/README.md).
-
-**Building the models yourself** (optional; this is how `models/` was made). Download the
-NVIDIA checkpoint and LibriSpeech, then quantize (the int4 step takes ~15 minutes):
-
-```bash
-mkdir -p data/models/citrinet_256_ls && curl -L -o data/models/citrinet_256_ls/stt_en_citrinet_256_ls.nemo \
-  https://huggingface.co/nvidia/stt_en_citrinet_256_ls/resolve/main/stt_en_citrinet_256_ls.nemo
-# LibriSpeech dev-clean and test-clean (https://www.openslr.org/12) unpacked into data/librispeech/
-cd export
-uv run export_onnx.py --cle && uv run mmrt_quant.py && uv run mmrt_export.py    # int8
-uv run int4_gptq.py --keep-io                                                    # int4
-uv run mmrt_cb4.py ../data/models/mmrt/citrinet256_cb4_gptq16_io.mmrt -o ../data/models/mmrt/citrinet256_int4.mmrt
-```
+Bluetooth is disabled in this firmware to make that room. Fitting BabyTalk next to WiFi, a
+camera or a screen from AtomVM (moving the shared block and task stacks to PSRAM, fewer
+WiFi buffers): [`atomvm/README.md`](atomvm/README.md). The chip's raw memory and
+arithmetic speeds: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Training for the real world (work in progress)
 
@@ -350,34 +354,25 @@ popular Wikipedia articles, Hacker News headlines, and your own list of words
 (`field/terms.txt`: names, commands, jargon). Background-only recordings are saved too,
 for mixing into training.
 
+**Hands free**: with a board that streams its mic over USB (`atomvm/apps/mic_stream`, e.g. on
+the LilyGO T-LoRa Pager), `capture.py --link usb --auto` records nothing but laptop voices,
+with no prompts, so a session can run during a drive. The laptop cuts each clip out of the
+stream where its playback starts (found by cross-correlation) and keeps the whole stream too.
+
 **Measuring** (`export/field_eval.py`): one command scores every model on the recordings.
 A fifth of the sentences are reserved for testing and never used in training.
 `export/hard_words.py` keeps a running list of the words the model gets wrong, and the
 recorder can target them (`--hard`) or redo the sentences it missed (`--retake`).
 
 **Training** (`train/finetune.py`, ~15 minutes on a laptop GPU; without one `--device cpu`
-works but takes ~1.5 days): the model keeps learning
-from 100 hours of audiobooks, plus synthetic speech of modern text and the field
-recordings, with the recorded background noise and other damage (muffling, clipping,
-dropouts) mixed in. Blending the fine-tuned weights with the original ones lets us choose
-how much clean-speech accuracy to keep.
+works but takes ~1.5 days): the model keeps learning from 100 hours of audiobooks, plus
+synthetic speech of modern text and the field recordings, with the recorded background
+noise and other damage (muffling, clipping, dropouts) mixed in.
 
-First results, on 120 recordings none of the models had heard (a new noise, and 30 clips
-of a real person reading), word error rate:
-
-| model (full precision) | new recordings | clean audiobooks |
-|---|---|---|
-| original | 46% | 3.9% |
-| fine-tuned, blended 70% with the original | 25% | 4.9% |
-| fine-tuned | 24% | 6.2% |
-
-So far this is the full-precision model on the PC. The int8 and int4 versions for the board
-still need to be rebuilt from it.
-
-**Hands free**: with a board that streams its mic over USB (`atomvm/apps/mic_stream`, e.g. on
-the LilyGO T-LoRa Pager), `capture.py --link usb --auto` records nothing but laptop voices,
-with no prompts, so a session can run during a drive. The laptop cuts each clip out of the
-stream where its playback starts (found by cross-correlation) and keeps the whole stream too.
+**Results so far**: the `noisy` models in [Models](#models). On 82 recordings none of the
+models had heard, the full-precision model went from 47.2% of words wrong to 30.8%, and the
+4-bit model on the board from 58.1% to 42.7%; on clean audiobooks they lost some accuracy.
+Training that keeps clean-speech accuracy is next ([`docs/ROADMAP.md`](docs/ROADMAP.md)).
 
 ```bash
 cd field && uv run prompts.py                                   # build the sentence pool
@@ -388,13 +383,15 @@ cd ../export && uv run field_eval.py --split all                # score the mode
 cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune (GPU if present; --device cpu|mps|cuda)
 ```
 
+Converting the result for the board: [`docs/MODELS.md`](docs/MODELS.md#2-your-own-fine-tuned-variant).
+
 ## Limitations
 
 - English only, 16 kHz audio. Transcription starts after you stop talking (no live
   streaming), and it is best with one speaker at a time close to the mic.
-- The models on the board are still the original ones, which struggle with loud background
-  noise; the fine-tuned model (above) isn't quantized for the board yet.
-- The int4 model trades ~2 points of accuracy for size (see the table above).
+- Background noise still costs a lot: the `noisy` models get a third to two fifths of the
+  words wrong in our noisy recordings, and trade away some clean-speech accuracy to do it.
+- The 4-bit model trades ~2 points of accuracy for size (see [Models](#models)).
 - The tiny voice is clear but clearly synthetic, and mispronounces some words.
 - MicroPython is tested on one board (the Waveshare ESP32-S3-CAM), AtomVM on the four in
   [What you need](#what-you-need). From AtomVM, another board with the same audio chips
@@ -409,10 +406,9 @@ cd ../train && uv run make_tts.py && uv run finetune.py         # fine-tune (GPU
 
 The fuller list, with what each item takes: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-
-- Rebuild the board's int8 and int4 models from the fine-tuned model, then train with the
-  8- and 4-bit arithmetic simulated (quantization-aware training) to recover their losses.
-- Record in a real vehicle, and on the target device (a LilyGO T-Watch S3 Plus).
+- Fine-tuning that keeps clean-speech accuracy, and training with the board's 8- and 4-bit
+  arithmetic simulated (quantization-aware training) to win back what quantization loses.
+- Record in more places and voices, and on the target device (a LilyGO T-Watch S3 Plus).
 - Transcribe while you are still talking (streaming).
 - A better voice on the S3: a voice distilled from bigger TTS models (on the ESP32-P4, sanoTTS's
   larger heart voice already runs at half real time: `docs/TTS_VOICES.md`).
@@ -446,7 +442,8 @@ Thomas Lackner. Other people's work used here keeps its own license:
 
 - **Speech models** (`models/`): derived from NVIDIA's
   [stt_en_citrinet_256_ls](https://huggingface.co/nvidia/stt_en_citrinet_256_ls),
-  CC-BY-4.0. Converted and quantized by this project; see [`models/README.md`](models/README.md).
+  CC-BY-4.0. Converted and quantized by this project, and for the `noisy` models
+  fine-tuned; see [`models/README.md`](models/README.md).
 - **Text to speech**: [sanoTTS](https://github.com/Ampixa/sanoTTS) by Ampixa, fetched at build
   time from your own checkout (pinned commit) -- none of it is in this repository. Its runtime
   is MIT and its dictionary (from misaki) Apache-2.0, but three of the files we compile carry
@@ -466,68 +463,3 @@ Thomas Lackner. Other people's work used here keeps its own license:
 - Parts of the 1x1 convolution kernel are adapted from Espressif's ESP-DL (MIT).
 
 Project history and early design notes: `docs/historical/`.
-
----
-
-## Appendix: ESP32-S3 benchmarks (Waveshare ESP32-S3-CAM)
-
-Measured with the `bench/` app on an ESP32-S3 (rev v0.2, 240 MHz) with 16 MB QIO flash at
-80 MHz, 8 MB octal PSRAM at 80 MHz, and a 64 KB data cache. These are properties of the
-chip and memory, so they may help with other projects. Terms are explained in the
-glossary below.
-
-**Memory speed**
-
-| memory | read | write |
-|---|---|---|
-| Internal SRAM | 425 MB/s (simple C loop; vector loads go faster) | 760 MB/s |
-| PSRAM, streaming | 88 MB/s | 49 MB/s |
-| Flash, memory-mapped | 32 MB/s | |
-| Flash, `esp_partition_read()` | 12.7 MB/s | |
-| SD card | not measured | |
-
-Flash and PSRAM share one bus, so their traffic takes turns: reading from both at once is
-no faster than reading from one. A second CPU core does not add memory bandwidth.
-
-**Free memory with bare ESP-IDF** (no WiFi): internal RAM 286 KB of 316 KB free (largest
-block 270 KB), PSRAM 8.0 MB free.
-
-**Arithmetic** (8-bit multiply-adds, in GMAC/s)
-
-| setup | GMAC/s |
-|---|---|
-| Theoretical vector peak, one core (16 per cycle at 240 MHz) | 3.84 |
-| MMRT 1x1 kernel, one core, weights in SRAM or cached | ~3.2 |
-| Generic dot-product kernel called per row (ESP-NN), one core, SRAM | 0.68 |
-| Same, two cores, SRAM | 1.35 |
-| Weights streamed from PSRAM, each used once | 0.085 |
-| Weights in PSRAM, each reused for 64 frames, two cores | 1.18 |
-| Weights read in place from flash, reused for 64 frames, two cores | 0.95 |
-
-The lesson: on this chip, speed comes from **reusing each weight many times once it is
-in fast memory**. Streaming weights once per use caps you at the memory speed (88 MB/s of
-8-bit weights is 0.088 GMAC/s), no matter how fast the math units are.
-
-**MMRT kernels:** the 1x1 convolution runs at 1.19 CPU cycles per 16-wide vector
-multiply-add, with operands in SRAM or cached PSRAM. The 4-bit weight unpacking runs at
-5.2 cycles per weight (portable C: 9.3).
-
-**Glossary**
-
-- **MAC / GMAC/s**: a multiply-accumulate is one multiplication added to a running sum, the
-  basic step of a neural network. GMAC/s is billions of them per second.
-- **SRAM** (internal RAM): the ~512 KB of fast memory inside the chip, shared with
-  ESP-IDF, WiFi and MicroPython.
-- **PSRAM**: the external 8 MB RAM chip; bigger and slower than SRAM.
-- **Memory-mapped flash**: flash the CPU reads like RAM, through a cache, without copying.
-- **PIE / SIMD**: the ESP32-S3's vector instructions, which do 16 8-bit operations at once.
-- **int8 / int4 / quantization**: storing a network's numbers as 8- or 4-bit integers
-  instead of 32-bit floats: smaller and faster, slightly less accurate.
-- **GPTQ**: a quantization method that corrects each rounding error using the remaining
-  weights, which keeps accuracy at 4 bits.
-- **CTC**: the output style of the speech model: one letter or word piece (or "nothing")
-  per 80 ms of audio, merged into text.
-- **Word error rate**: the fraction of words a transcript gets wrong (substituted, missing
-  or extra).
-- **LoRa / LoRA**: LoRa is a long-range, very low-bandwidth radio. LoRA (Low-Rank
-  Adaptation) is a way to adapt a neural network by adding small trainable matrices.

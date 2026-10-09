@@ -7,8 +7,8 @@ our own notes; nothing here is scheduled.
 ## 1. Ship the fine-tuned speech model
 
 **Why:** noise is BabyTalk's biggest weakness, and the fine-tuned model is the fix: on held-out
-recordings with background noise, full-precision word error rate went from 46% to 24-25%
-(root README, "Training for the real world"). Today it only exists on the PC.
+recordings with background noise, full-precision word error rate went from 47% to 31%, and the
+4-bit model on the board from 58% to 43% (root README, "Training for the real world").
 
 **Status:** the recording, training and scoring tools work (`field/`, `train/`,
 `export/field_eval.py`). Blocked on data: a few hundred more voice recordings in different

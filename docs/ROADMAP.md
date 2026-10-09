@@ -20,10 +20,10 @@ test word error rate 42.7% against 58.1% for the stock 4-bit model, but LibriSpe
 11.8% against 8.2%. Fine-tuning cost some clean-speech accuracy, and 4-bit quantization made
 that worse.
 
-**Then:** more varied recordings, then a training mix that keeps clean-speech accuracy (more
-LibriSpeech weight, or blending with the original weights). Then publish the int8 and int4
-images next to the originals in `models/` (CC-BY-4.0 attribution carries over). No firmware
-change. See [MODELS.md](MODELS.md#2-your-own-fine-tuned-variant).
+**Published** as `models/citrinet256_noisy_int4.mmrt` and `_int8.mmrt`, an alternative to the
+originals rather than a replacement. **Then:** more varied recordings, and a training mix that
+keeps clean-speech accuracy (more LibriSpeech weight, or blending with the original weights).
+No firmware change. See [MODELS.md](MODELS.md#2-your-own-fine-tuned-variant).
 
 ## 2. Win back the int8/int4 accuracy loss (quantization-aware training)
 

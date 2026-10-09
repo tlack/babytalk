@@ -15,15 +15,20 @@ and a different voice (6). Each says what it takes and what we have and haven't 
 
 ## 1. Our speech models
 
-Both are in `models/` (details, SHA-256 and licence in [`models/README.md`](../models/README.md)):
+All four are in `models/` (details, SHA-256 and licence in [`models/README.md`](../models/README.md)).
+The `noisy` pair is fine-tuned for background noise (section 2): **an alternative, not an
+upgrade**, better with noise in the room and worse on clean speech.
 
-| file | size | word error rate (LibriSpeech test-clean) | fits |
-|---|---|---|---|
-| `citrinet256_int4.mmrt` | 5.99 MB | 8.2% | the standard 6 MB `model` partition |
-| `citrinet256_int8.mmrt` | 9.78 MB | 6.3% | only a 10 MB partition (MicroPython's int8 layout) |
+| file | size | noisy rooms (field recordings) | clean speech (LibriSpeech test-clean) | fits |
+|---|---|---|---|---|
+| `citrinet256_int4.mmrt` | 5.99 MB | 58.1% | 8.2% | the standard 6 MB `model` partition |
+| `citrinet256_int8.mmrt` | 9.78 MB | 51.5% | 6.3% | only a 10 MB partition (MicroPython's int8 layout) |
+| `citrinet256_noisy_int4.mmrt` | 5.99 MB | 42.7% | 11.8% | the standard 6 MB `model` partition |
+| `citrinet256_noisy_int8.mmrt` | 9.78 MB | 33.8% | 7.8% | only a 10 MB partition (MicroPython's int8 layout) |
 
-The original full-precision model scores 3.8%; the int8 and int4 versions lose accuracy to
-quantization (section 2 has what we plan to do about it).
+Word error rate, lower is better. The original full-precision model scores 3.8% on clean
+speech; the int8 and int4 versions lose accuracy to quantization (section 2 has what we plan
+to do about it).
 
 **Flashing one** (esptool, from the repo root):
 

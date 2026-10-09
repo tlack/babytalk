@@ -437,7 +437,8 @@ The fuller list, with what each item takes: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 ## Credits and licenses
 
 BabyTalk was made by **Thomas Lackner** and **Claude Opus 5.5** (Anthropic's AI model),
-working together.
+working together. Winford (@UncleGrumpy) provided vital quality assurance and AtomVM
+idiomacy sanity checks.
 
 The code in this repository is released under the [MIT license](LICENSE), copyright
 Thomas Lackner. Other people's work used here keeps its own license:
